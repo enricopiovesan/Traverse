@@ -93,6 +93,22 @@ If we have four active dev threads, then all four can honestly be `In Progress`.
 
 ## Starter Prompts
 
+## Chat Trigger
+
+Use this short trigger when you want Codex to start or resume the standard Traverse operating model without retyping the full instructions:
+
+```text
+TRAVERSE OPS
+```
+
+When Enrico says `TRAVERSE OPS`, Codex should treat it as:
+
+- Start or resume the ready-ticket worker: pick one Ready Project 1 ticket, follow `AGENTS.md`, claim it, set Project status to `In Progress`, implement one issue on one branch, open one PR, and keep going until merged or genuinely blocked.
+- Start or resume the PR finisher: inspect open PRs, rebase/update immediately when behind, fix CI/review issues, rerun gates, merge green PRs, and update linked issues and Project 1 state.
+- Start or resume the PM/PO backlog gardener: audit Project 1 statuses, labels, blockers, and notes; ensure Todo items become `Ready` or `Blocked`; ensure Blocked items have a note; create missing tickets with full Definition of Done.
+- Do all feasible work autonomously and ask only when a product decision is truly required.
+- Do not use labels as status; Project 1 status is the actionability source of truth.
+
 Use this PM thread prompt:
 
 ```text
