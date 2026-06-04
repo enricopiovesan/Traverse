@@ -28,6 +28,9 @@ const DEFAULT_WORKSPACE_ID: &str = "local-default";
 const SERVER_DISCOVERY_SCHEMA_VERSION: &str = "1.0.0";
 const DEFAULT_IDEMPOTENCY_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 const MIN_IDEMPOTENCY_RETENTION_SECONDS: u64 = 60;
+const CORS_ALLOW_METHODS: &str = "GET, POST, OPTIONS";
+const CORS_ALLOW_HEADERS: &str = "Authorization, Content-Type, Idempotency-Key, Prefer";
+const CORS_MAX_AGE_SECONDS: &str = "600";
 
 /// Errors that can occur while serving the HTTP/JSON API.
 #[derive(Debug)]
@@ -51,6 +54,7 @@ impl std::fmt::Display for ServeError {
 pub struct ApiServerConfig<E> {
     pub bind_address: String,
     pub allow_unauthenticated: bool,
+    pub allowed_origins: Vec<String>,
     pub capability_registry: CapabilityRegistry,
     pub workflow_registry: WorkflowRegistry,
     pub registry_root: PathBuf,
@@ -61,6 +65,7 @@ pub struct ApiServerConfig<E> {
 
 struct ApiState<E> {
     allow_unauthenticated: bool,
+    allowed_origins: Vec<String>,
     registry_root: PathBuf,
     executor: E,
     workspaces: RefCell<HashMap<String, WorkspaceState<E>>>,
@@ -232,6 +237,7 @@ where
 
     let state = ApiState {
         allow_unauthenticated: config.allow_unauthenticated,
+        allowed_origins: config.allowed_origins,
         registry_root: config.registry_root,
         executor: config.executor,
         workspaces: RefCell::new(workspaces),
@@ -356,6 +362,7 @@ where
         Self {
             state: ApiState {
                 allow_unauthenticated: config.allow_unauthenticated,
+                allowed_origins: config.allowed_origins,
                 registry_root: config.registry_root,
                 executor: config.executor,
                 workspaces: RefCell::new(workspaces),
@@ -1616,66 +1623,87 @@ fn handle_connection<E: LocalExecutor + Clone>(
         .peer_addr()
         .map(|a| a.ip())
         .unwrap_or(IpAddr::from([127, 0, 0, 1]));
+    let loopback = peer_ip.is_loopback();
 
-    if request.path != "/healthz" && !state.allow_unauthenticated && !peer_ip.is_loopback() {
+    if request.method == "OPTIONS" {
+        return handle_cors_preflight(&mut stream, &request, state, loopback);
+    }
+
+    let cors_headers = match cors_response_headers(&request, state, loopback) {
+        Ok(headers) => headers,
+        Err(message) => {
+            return write_json(
+                &mut stream,
+                403,
+                "Forbidden",
+                &error_envelope("cors_origin_forbidden", &message),
+            );
+        }
+    };
+
+    if request.path != "/healthz" && !state.allow_unauthenticated && !loopback {
         let has_bearer = request
             .headers
             .get("authorization")
             .is_some_and(|v| v.starts_with("Bearer "));
 
         if !has_bearer {
-            return write_json(
-                &mut stream,
+            let mut response = BufferedResponse::new();
+            write_json(
+                &mut response,
                 401,
                 "Unauthorized",
                 &error_envelope("unauthorized", "Bearer token required"),
-            );
+            )?;
+            return response.write_to(&mut stream, &cors_headers);
         }
     }
 
     if let Some(err) = unsupported_media_type_error(&request) {
-        return write_json(
-            &mut stream,
+        let mut response = BufferedResponse::new();
+        write_json(
+            &mut response,
             err.status,
             err.reason,
             &error_envelope(err.code, &err.message),
-        );
+        )?;
+        return response.write_to(&mut stream, &cors_headers);
     }
 
+    let mut response = BufferedResponse::new();
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/healthz") => handle_health(&mut stream, peer_ip.is_loopback()),
+        ("GET", "/healthz") => handle_health(&mut response, loopback),
         ("GET", "/v1/capabilities") => {
-            handle_list_capabilities(&mut stream, &request, state, peer_ip.is_loopback())
+            handle_list_capabilities(&mut response, &request, state, loopback)
         }
         ("POST", "/v1/capabilities/register") => {
-            handle_register_capability(&mut stream, &request, state, peer_ip.is_loopback())
+            handle_register_capability(&mut response, &request, state, loopback)
         }
         ("POST", "/v1/capabilities/execute") => {
-            handle_execute(&mut stream, &request, state, peer_ip.is_loopback())
+            handle_execute(&mut response, &request, state, loopback)
         }
         (method, path) if workspace_operation_path(method, path).is_some() => {
-            handle_workspace_operation(&mut stream, &request, state, peer_ip.is_loopback())
+            handle_workspace_operation(&mut response, &request, state, loopback)
         }
         ("POST", "/v1/workflows/register") => {
-            handle_register_workflow(&mut stream, &request, state, peer_ip.is_loopback())
+            handle_register_workflow(&mut response, &request, state, loopback)
         }
-        ("GET", "/v1/workflows") => {
-            handle_list_workflows(&mut stream, &request, state, peer_ip.is_loopback())
-        }
+        ("GET", "/v1/workflows") => handle_list_workflows(&mut response, &request, state, loopback),
         ("GET", path) if path.starts_with("/v1/workflows/") => handle_get_workflow(
-            &mut stream,
+            &mut response,
             &request,
             state,
-            peer_ip.is_loopback(),
+            loopback,
             path.trim_start_matches("/v1/workflows/"),
         ),
         _ => write_json(
-            &mut stream,
+            &mut response,
             404,
             "Not Found",
             &error_envelope("not_found", "route not found"),
         ),
-    }
+    }?;
+    response.write_to(&mut stream, &cors_headers)
 }
 
 fn handle_workspace_operation<W: Write, E: LocalExecutor + Clone>(
@@ -1704,6 +1732,160 @@ fn handle_workspace_operation<W: Write, E: LocalExecutor + Clone>(
             handle_trace_fetch(w, request, state, loopback, &workspace_id, &execution_id)
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeaderLine {
+    name: String,
+    value: String,
+}
+
+struct BufferedResponse {
+    bytes: Vec<u8>,
+}
+
+impl BufferedResponse {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn write_to<W: Write>(&self, w: &mut W, extra_headers: &[HeaderLine]) -> Result<(), String> {
+        if extra_headers.is_empty() {
+            w.write_all(&self.bytes)
+                .map_err(|e| format!("failed to write HTTP response: {e}"))?;
+            return w
+                .flush()
+                .map_err(|e| format!("failed to flush HTTP response: {e}"));
+        }
+
+        let Some(header_end) = find_header_end(&self.bytes) else {
+            w.write_all(&self.bytes)
+                .map_err(|e| format!("failed to write HTTP response: {e}"))?;
+            return w
+                .flush()
+                .map_err(|e| format!("failed to flush HTTP response: {e}"));
+        };
+
+        w.write_all(&self.bytes[..header_end])
+            .map_err(|e| format!("failed to write HTTP response header: {e}"))?;
+        for header in extra_headers {
+            write!(w, "\r\n{}: {}", header.name, header.value)
+                .map_err(|e| format!("failed to write HTTP response header: {e}"))?;
+        }
+        w.write_all(&self.bytes[header_end..])
+            .map_err(|e| format!("failed to write HTTP response body: {e}"))?;
+        w.flush()
+            .map_err(|e| format!("failed to flush HTTP response: {e}"))
+    }
+}
+
+impl Write for BufferedResponse {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn handle_cors_preflight<W: Write, E>(
+    w: &mut W,
+    request: &HttpRequest,
+    state: &ApiState<E>,
+    loopback: bool,
+) -> Result<(), String> {
+    let headers = match cors_response_headers(request, state, loopback) {
+        Ok(headers) => headers,
+        Err(message) => {
+            return write_json(
+                w,
+                403,
+                "Forbidden",
+                &error_envelope("cors_origin_forbidden", &message),
+            );
+        }
+    };
+    if headers.is_empty() {
+        return write_json(
+            w,
+            403,
+            "Forbidden",
+            &error_envelope("cors_origin_forbidden", "Origin is not allowed"),
+        );
+    }
+
+    write_raw_with_headers(w, 204, "No Content", "application/json", &[], &headers)
+}
+
+fn cors_response_headers<E>(
+    request: &HttpRequest,
+    state: &ApiState<E>,
+    loopback: bool,
+) -> Result<Vec<HeaderLine>, String> {
+    let Some(origin) = request.headers.get("origin") else {
+        return Ok(Vec::new());
+    };
+
+    if !is_cors_origin_allowed(origin, &state.allowed_origins, loopback) {
+        return Err("CORS origin is not allowed".to_string());
+    }
+
+    Ok(vec![
+        HeaderLine {
+            name: "Access-Control-Allow-Origin".to_string(),
+            value: origin.clone(),
+        },
+        HeaderLine {
+            name: "Vary".to_string(),
+            value: "Origin".to_string(),
+        },
+        HeaderLine {
+            name: "Access-Control-Allow-Methods".to_string(),
+            value: CORS_ALLOW_METHODS.to_string(),
+        },
+        HeaderLine {
+            name: "Access-Control-Allow-Headers".to_string(),
+            value: CORS_ALLOW_HEADERS.to_string(),
+        },
+        HeaderLine {
+            name: "Access-Control-Max-Age".to_string(),
+            value: CORS_MAX_AGE_SECONDS.to_string(),
+        },
+    ])
+}
+
+fn is_cors_origin_allowed(origin: &str, configured_origins: &[String], loopback: bool) -> bool {
+    if configured_origins
+        .iter()
+        .any(|configured| configured == origin)
+    {
+        return true;
+    }
+
+    loopback && is_loopback_browser_origin(origin)
+}
+
+fn is_loopback_browser_origin(origin: &str) -> bool {
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+
+    let host = if let Some(after_bracket) = rest.strip_prefix("[::1]") {
+        if after_bracket.is_empty() || after_bracket.starts_with(':') {
+            "::1"
+        } else {
+            return false;
+        }
+    } else {
+        rest.split(':').next().unwrap_or_default()
+    };
+
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn unsupported_media_type_error(request: &HttpRequest) -> Option<ApiError> {
@@ -3011,11 +3193,28 @@ fn write_raw<W: Write>(
     content_type: &str,
     body: &[u8],
 ) -> Result<(), String> {
+    write_raw_with_headers(w, status, reason, content_type, body, &[])
+}
+
+fn write_raw_with_headers<W: Write>(
+    w: &mut W,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &[u8],
+    extra_headers: &[HeaderLine],
+) -> Result<(), String> {
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close",
         body.len()
     );
     w.write_all(header.as_bytes())
+        .map_err(|e| format!("failed to write HTTP response header: {e}"))?;
+    for header in extra_headers {
+        write!(w, "\r\n{}: {}", header.name, header.value)
+            .map_err(|e| format!("failed to write HTTP response header: {e}"))?;
+    }
+    w.write_all(b"\r\n\r\n")
         .map_err(|e| format!("failed to write HTTP response header: {e}"))?;
     w.write_all(body)
         .map_err(|e| format!("failed to write HTTP response body: {e}"))?;
@@ -3221,6 +3420,7 @@ mod tests {
 
         ApiState {
             allow_unauthenticated: true,
+            allowed_origins: Vec::new(),
             registry_root,
             executor,
             workspaces: RefCell::new(workspaces),
@@ -3254,6 +3454,7 @@ mod tests {
 
         ApiState {
             allow_unauthenticated: true,
+            allowed_origins: Vec::new(),
             registry_root,
             executor,
             workspaces: RefCell::new(workspaces),
@@ -3389,6 +3590,91 @@ mod tests {
         text.lines()
             .find_map(|line| line.strip_prefix("Content-Type: ").map(ToString::to_string))
             .expect("content-type header must be present")
+    }
+
+    fn response_header(response: &[u8], name: &str) -> Option<String> {
+        let text = std::str::from_utf8(response).expect("response must be UTF-8");
+        let prefix = format!("{name}: ");
+        text.lines()
+            .find_map(|line| line.strip_prefix(&prefix).map(ToString::to_string))
+    }
+
+    // ------------------------------------------------------------------
+    // CORS policy
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cors_allows_loopback_browser_origins_for_dev_loopback_by_default() {
+        let mut state = empty_state();
+        state.allowed_origins.clear();
+        let mut req = make_http_request("GET", "/healthz", Vec::new());
+        req.headers
+            .insert("origin".to_string(), "http://localhost:3000".to_string());
+
+        let headers =
+            cors_response_headers(&req, &state, true).expect("loopback origin must be allowed");
+
+        assert!(headers.iter().any(|header| {
+            header.name == "Access-Control-Allow-Origin" && header.value == "http://localhost:3000"
+        }));
+    }
+
+    #[test]
+    fn cors_requires_exact_configured_origin_for_non_loopback_callers() {
+        let mut state = empty_state();
+        state.allowed_origins = vec!["https://app.example".to_string()];
+        let mut allowed = make_http_request("GET", "/healthz", Vec::new());
+        allowed
+            .headers
+            .insert("origin".to_string(), "https://app.example".to_string());
+        let mut denied = make_http_request("GET", "/healthz", Vec::new());
+        denied
+            .headers
+            .insert("origin".to_string(), "https://other.example".to_string());
+
+        assert!(cors_response_headers(&allowed, &state, false).is_ok());
+        assert!(cors_response_headers(&denied, &state, false).is_err());
+    }
+
+    #[test]
+    fn cors_preflight_returns_allow_headers_for_allowed_origin() {
+        let state = empty_state();
+        let mut req = make_http_request("OPTIONS", "/v1/capabilities", Vec::new());
+        req.headers
+            .insert("origin".to_string(), "http://127.0.0.1:5173".to_string());
+
+        let mut out = Vec::new();
+        handle_cors_preflight(&mut out, &req, &state, true)
+            .expect("preflight must write a response");
+
+        assert_eq!(response_status(&out), 204);
+        assert_eq!(
+            response_header(&out, "Access-Control-Allow-Origin"),
+            Some("http://127.0.0.1:5173".to_string())
+        );
+        assert_eq!(
+            response_header(&out, "Access-Control-Allow-Methods"),
+            Some(CORS_ALLOW_METHODS.to_string())
+        );
+    }
+
+    #[test]
+    fn cors_preflight_rejects_unconfigured_non_loopback_origin() {
+        let state = empty_state();
+        let mut req = make_http_request("OPTIONS", "/v1/capabilities", Vec::new());
+        req.headers
+            .insert("origin".to_string(), "https://other.example".to_string());
+
+        let mut out = Vec::new();
+        handle_cors_preflight(&mut out, &req, &state, false)
+            .expect("preflight must write a response");
+
+        assert_eq!(response_status(&out), 403);
+        assert_eq!(response_content_type(&out), "application/problem+json");
+        assert_eq!(
+            parse_response_body(&out)["traverse_code"],
+            "cors_origin_forbidden"
+        );
     }
 
     // ------------------------------------------------------------------
