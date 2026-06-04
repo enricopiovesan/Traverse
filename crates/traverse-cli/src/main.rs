@@ -92,6 +92,7 @@ enum Command {
     Serve {
         bind_address: String,
         allow_unauthenticated: bool,
+        allowed_origins: Vec<String>,
     },
 }
 
@@ -136,8 +137,9 @@ fn main() -> ExitCode {
         Ok(Command::Serve {
             bind_address,
             allow_unauthenticated,
+            allowed_origins,
         }) => {
-            if let Err(error) = run_serve(bind_address, allow_unauthenticated) {
+            if let Err(error) = run_serve(bind_address, allow_unauthenticated, allowed_origins) {
                 eprintln!("{error}");
                 ExitCode::FAILURE
             } else {
@@ -659,6 +661,8 @@ fn help_serve() -> String {
   Optional flags:
     --bind <address>           Address and port to listen on (default: 127.0.0.1:8787).
     --port <N>                 Compatibility shortcut for --bind 127.0.0.1:<N>.
+    --allow-origin <origin>    Allow an exact browser Origin, repeatable for
+                               production web apps. Wildcard '*' is rejected.
     --allow-unauthenticated    Accept unauthenticated requests from non-loopback
                                addresses. Prints a warning to stderr. Unsafe in
                                production.
@@ -675,9 +679,23 @@ fn parse_serve_command(args: &[String]) -> Result<Command, String> {
     let allow_unauthenticated = args.iter().any(|a| a == "--allow-unauthenticated");
     let bind_flag_pos = args.iter().position(|a| a == "--bind");
     let port_flag_pos = args.iter().position(|a| a == "--port");
+    let mut allowed_origins = Vec::new();
 
     if bind_flag_pos.is_some() && port_flag_pos.is_some() {
         return Err("--bind and --port cannot be used together".to_string());
+    }
+
+    for (idx, arg) in args.iter().enumerate() {
+        if arg != "--allow-origin" {
+            continue;
+        }
+        let origin = args
+            .get(idx + 1)
+            .ok_or_else(|| "--allow-origin requires a value".to_string())?;
+        if origin == "*" {
+            return Err("--allow-origin '*' is not allowed".to_string());
+        }
+        allowed_origins.push(origin.clone());
     }
 
     let bind_address = if let Some(pos) = bind_flag_pos {
@@ -698,16 +716,22 @@ fn parse_serve_command(args: &[String]) -> Result<Command, String> {
     Ok(Command::Serve {
         bind_address,
         allow_unauthenticated,
+        allowed_origins,
     })
 }
 
-fn run_serve(bind_address: String, allow_unauthenticated: bool) -> Result<(), String> {
+fn run_serve(
+    bind_address: String,
+    allow_unauthenticated: bool,
+    allowed_origins: Vec<String>,
+) -> Result<(), String> {
     let registered =
         load_registered_bundle(&canonical_expedition_bundle_path()).map_err(|e| e.to_string())?;
 
     let config = http_api::ApiServerConfig {
         bind_address,
         allow_unauthenticated,
+        allowed_origins,
         capability_registry: registered.capability_registry,
         workflow_registry: registered.workflow_registry,
         registry_root: std::env::current_dir()
@@ -1178,6 +1202,7 @@ fn build_in_process_api() -> Result<http_api::InProcessApi<ExpeditionExampleExec
     Ok(http_api::InProcessApi::new(http_api::ApiServerConfig {
         bind_address: "127.0.0.1:0".to_string(),
         allow_unauthenticated: true,
+        allowed_origins: Vec::new(),
         capability_registry: registered.capability_registry,
         workflow_registry: registered.workflow_registry,
         registry_root: std::env::current_dir()
@@ -2375,9 +2400,11 @@ mod tests {
             Command::Serve {
                 bind_address,
                 allow_unauthenticated,
+                allowed_origins,
             } => {
                 assert_eq!(bind_address, "127.0.0.1:8787");
                 assert!(!allow_unauthenticated);
+                assert!(allowed_origins.is_empty());
             }
             other => assert!(matches!(other, Command::Serve { .. })),
         }
@@ -2418,6 +2445,7 @@ mod tests {
             Command::Serve {
                 bind_address,
                 allow_unauthenticated,
+                ..
             } => {
                 assert_eq!(bind_address, "127.0.0.1:9090");
                 assert!(allow_unauthenticated);
@@ -2439,6 +2467,48 @@ mod tests {
 
         let error = parse_command(&args).expect_err("bind plus port should be rejected");
         assert!(error.contains("--bind and --port cannot be used together"));
+    }
+
+    #[test]
+    fn parse_serve_accepts_repeatable_allow_origin() {
+        let args = vec![
+            "traverse-cli".to_string(),
+            "serve".to_string(),
+            "--allow-origin".to_string(),
+            "https://app.example".to_string(),
+            "--allow-origin".to_string(),
+            "https://admin.example".to_string(),
+        ];
+
+        let command = parse_command(&args).expect("serve command should parse");
+
+        match command {
+            Command::Serve {
+                allowed_origins, ..
+            } => {
+                assert_eq!(
+                    allowed_origins,
+                    vec![
+                        "https://app.example".to_string(),
+                        "https://admin.example".to_string()
+                    ]
+                );
+            }
+            other => assert!(matches!(other, Command::Serve { .. })),
+        }
+    }
+
+    #[test]
+    fn parse_serve_rejects_wildcard_allow_origin() {
+        let args = vec![
+            "traverse-cli".to_string(),
+            "serve".to_string(),
+            "--allow-origin".to_string(),
+            "*".to_string(),
+        ];
+
+        let error = parse_command(&args).expect_err("wildcard origin should be rejected");
+        assert!(error.contains("--allow-origin '*' is not allowed"));
     }
 
     #[test]
