@@ -3270,6 +3270,32 @@ mod tests {
             first.exporter.endpoint.as_deref(),
             Some("http://collector:4318")
         );
+        assert_eq!(
+            runtime.observability_config().exporter.endpoint.as_deref(),
+            Some("http://collector:4318")
+        );
+    }
+
+    #[test]
+    fn otel_timestamp_helpers_default_without_transitions() {
+        let transitions = Vec::new();
+
+        assert_eq!(
+            super::first_transition_time(&transitions),
+            "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            super::last_transition_time(&transitions),
+            "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            super::phase_started_at(&transitions, 0),
+            "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            super::phase_ended_at(&transitions, 0),
+            "1970-01-01T00:00:00Z"
+        );
     }
 
     #[test]
