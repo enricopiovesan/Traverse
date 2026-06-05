@@ -2,7 +2,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use traverse_runtime::executor::{
     ArtifactType, CapabilityExecutor, ExecutorCapability, ExecutorError, NativeExecutor,
-    WasmExecutor,
+    SUPPORTED_HOST_ABI_VERSION, WasmExecutor, supported_host_abi_versions,
+    verify_wasm_host_abi_bytes,
 };
 
 // --- NativeExecutor tests ---
@@ -46,6 +47,7 @@ fn native_executor_rejects_wasm_artifact_type() -> Result<(), String> {
         artifact_type: ArtifactType::Wasm,
         wasm_binary_path: None,
         wasm_checksum: None,
+        host_abi_version: None,
     };
     let err = expect_err(executor.execute(&cap, &json!({})), "expected type error")?;
 
@@ -89,6 +91,7 @@ fn wasm_executor_errors_when_no_path_set() -> Result<(), String> {
         artifact_type: ArtifactType::Wasm,
         wasm_binary_path: None,
         wasm_checksum: None,
+        host_abi_version: None,
     };
     let err = expect_err(
         executor.execute(&cap, &json!({})),
@@ -111,6 +114,7 @@ fn wasm_executor_errors_on_missing_file() -> Result<(), String> {
         artifact_type: ArtifactType::Wasm,
         wasm_binary_path: Some("/nonexistent/path/module.wasm".to_string()),
         wasm_checksum: None,
+        host_abi_version: None,
     };
     let err = expect_err(
         executor.execute(&cap, &json!({})),
@@ -147,6 +151,7 @@ fn wasm_executor_detects_checksum_mismatch() -> Result<(), String> {
         wasm_checksum: Some(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         ),
+        host_abi_version: None,
     };
 
     let err = expect_err(
@@ -235,6 +240,95 @@ fn wasm_executor_rejects_invalid_json_output() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn wasm_host_abi_verifier_accepts_sanctioned_stdio_imports() -> Result<(), String> {
+    let wasm_bytes = wat::parse_str(echo_wat()).map_err(|e| format!("WAT parse: {e}"))?;
+
+    let validation = verify_wasm_host_abi_bytes(&wasm_bytes, SUPPORTED_HOST_ABI_VERSION)
+        .map_err(|e| format!("{e:?}"))?;
+
+    assert_eq!(validation.abi_version, SUPPORTED_HOST_ABI_VERSION);
+    assert_eq!(supported_host_abi_versions(), &[SUPPORTED_HOST_ABI_VERSION]);
+    assert!(
+        validation.imports.iter().any(|import| {
+            import.module == "wasi_snapshot_preview1" && import.name == "fd_read"
+        })
+    );
+    assert!(
+        validation.imports.iter().any(|import| {
+            import.module == "wasi_snapshot_preview1" && import.name == "fd_write"
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn wasm_host_abi_verifier_rejects_unauthorized_import_before_execution() -> Result<(), String> {
+    let wat_src = r#"
+        (module
+            (import "wasi_snapshot_preview1" "random_get"
+                (func $random_get (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func $_start (export "_start")
+                unreachable
+            )
+        )
+    "#;
+    let wasm_bytes = wat::parse_str(wat_src).map_err(|e| format!("WAT parse: {e}"))?;
+    let executor = WasmExecutor::new().map_err(|e| format!("{e:?}"))?;
+
+    let err = expect_err(
+        executor.run_bytes(&wasm_bytes, &json!({})),
+        "expected unauthorized host import",
+    )?;
+
+    assert_eq!(
+        err,
+        ExecutorError::UnauthorizedHostImport {
+            error_code: "unauthorized_host_import".to_string(),
+            abi_version: SUPPORTED_HOST_ABI_VERSION.to_string(),
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "random_get".to_string(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn wasm_host_abi_verifier_rejects_unsupported_abi_version() -> Result<(), String> {
+    let wasm_bytes = wat::parse_str(echo_wat()).map_err(|e| format!("WAT parse: {e}"))?;
+    let executor = WasmExecutor::new().map_err(|e| format!("{e:?}"))?;
+
+    let err = expect_err(
+        executor.run_bytes_with_host_abi(&wasm_bytes, &json!({}), "2.0.0"),
+        "expected unsupported ABI version",
+    )?;
+
+    assert_eq!(
+        err,
+        ExecutorError::UnsupportedAbiVersion {
+            error_code: "unsupported_abi_version".to_string(),
+            requested: "2.0.0".to_string(),
+            supported: SUPPORTED_HOST_ABI_VERSION.to_string(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn wasm_host_abi_verifier_reports_malformed_binary() -> Result<(), String> {
+    let err = expect_err(
+        verify_wasm_host_abi_bytes(b"not-a-wasm-binary", SUPPORTED_HOST_ABI_VERSION),
+        "expected malformed WASM artifact",
+    )?;
+
+    assert!(
+        matches!(err, ExecutorError::MalformedWasmArtifact { .. }),
+        "expected MalformedWasmArtifact, got {err:?}"
+    );
+    Ok(())
+}
+
 // --- Debug impl coverage ---
 
 #[test]
@@ -263,6 +357,30 @@ fn executor_error_display_covers_all_variants() {
         (
             ExecutorError::RuntimeSetupFailed("bad linker".to_string()),
             "runtime setup failed: bad linker",
+        ),
+        (
+            ExecutorError::MalformedWasmArtifact {
+                error_code: "malformed_wasm_artifact".to_string(),
+                detail: "bad magic".to_string(),
+            },
+            "malformed_wasm_artifact: bad magic",
+        ),
+        (
+            ExecutorError::UnsupportedAbiVersion {
+                error_code: "unsupported_abi_version".to_string(),
+                requested: "2.0.0".to_string(),
+                supported: "1.0.0".to_string(),
+            },
+            "unsupported_abi_version: requested Traverse Host ABI 2.0.0, supported 1.0.0",
+        ),
+        (
+            ExecutorError::UnauthorizedHostImport {
+                error_code: "unauthorized_host_import".to_string(),
+                abi_version: "1.0.0".to_string(),
+                module: "wasi_snapshot_preview1".to_string(),
+                name: "random_get".to_string(),
+            },
+            "unauthorized_host_import: ABI 1.0.0 does not allow import wasi_snapshot_preview1::random_get",
         ),
         (
             ExecutorError::ExecutionFailed("trapped".to_string()),
@@ -319,6 +437,7 @@ fn wasm_executor_full_execute_path_via_disk() -> Result<(), String> {
         artifact_type: ArtifactType::Wasm,
         wasm_binary_path: Some(tmp.clone()),
         wasm_checksum: None, // no checksum — exercises the skip-checksum branch
+        host_abi_version: None,
     };
 
     let input = json!({ "disk": true });
@@ -362,6 +481,7 @@ fn wasm_executor_execute_with_matching_checksum_succeeds() -> Result<(), String>
         artifact_type: ArtifactType::Wasm,
         wasm_binary_path: Some(tmp.clone()),
         wasm_checksum: Some(checksum),
+        host_abi_version: Some("1.0.0".to_string()),
     };
 
     let result = executor
@@ -386,14 +506,15 @@ fn wasm_executor_invalid_binary_triggers_runtime_setup_failed() -> Result<(), St
         artifact_type: ArtifactType::Wasm,
         wasm_binary_path: Some(tmp.clone()),
         wasm_checksum: None,
+        host_abi_version: None,
     };
 
     let err = expect_err(executor.execute(&cap, &json!({})), "expected error")?;
     std::fs::remove_file(&tmp).ok();
 
     assert!(
-        matches!(err, ExecutorError::RuntimeSetupFailed(_)),
-        "expected RuntimeSetupFailed, got {err:?}"
+        matches!(err, ExecutorError::MalformedWasmArtifact { .. }),
+        "expected MalformedWasmArtifact, got {err:?}"
     );
     Ok(())
 }
@@ -406,6 +527,7 @@ fn native_capability(id: &str) -> ExecutorCapability {
         artifact_type: ArtifactType::Native,
         wasm_binary_path: None,
         wasm_checksum: None,
+        host_abi_version: None,
     }
 }
 
@@ -417,6 +539,28 @@ fn tempfile_path() -> String {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     )
+}
+
+fn echo_wat() -> &'static str {
+    r#"
+        (module
+            (import "wasi_snapshot_preview1" "fd_read"
+                (func $fd_read (param i32 i32 i32 i32) (result i32)))
+            (import "wasi_snapshot_preview1" "fd_write"
+                (func $fd_write (param i32 i32 i32 i32) (result i32)))
+            (import "wasi_snapshot_preview1" "proc_exit"
+                (func $proc_exit (param i32)))
+            (memory (export "memory") 1)
+            (func $_start (export "_start")
+                (i32.store (i32.const 0) (i32.const 8))
+                (i32.store (i32.const 4) (i32.const 4096))
+                (drop (call $fd_read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 4100)))
+                (i32.store (i32.const 0) (i32.const 8))
+                (i32.store (i32.const 4) (i32.load (i32.const 4100)))
+                (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 4104)))
+            )
+        )
+    "#
 }
 
 /// Assert that `result` is `Err`, returning the error value or a descriptive `String` failure.

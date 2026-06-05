@@ -275,6 +275,7 @@ fn expedition_wasm_execution_writes_trace() -> Result<(), String> {
             artifact_type: ArtifactType::Wasm,
             wasm_binary_path: Some(tmp_path.clone()),
             wasm_checksum: None,
+            host_abi_version: None,
         },
         emitted_events: Vec::new(),
     };
@@ -393,6 +394,7 @@ fn run_expedition_via_router(wasm_bytes: &[u8], tmp_path: &str) -> Result<Router
             artifact_type: ArtifactType::Wasm,
             wasm_binary_path: Some(tmp_path.to_string()),
             wasm_checksum: None,
+            host_abi_version: None,
         },
         emitted_events: Vec::new(),
     };

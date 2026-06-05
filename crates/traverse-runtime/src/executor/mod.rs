@@ -10,7 +10,10 @@ pub mod native;
 pub mod wasm;
 
 pub use native::NativeExecutor;
-pub use wasm::WasmExecutor;
+pub use wasm::{
+    HostAbiImport, HostAbiValidation, SUPPORTED_HOST_ABI_VERSION, WasmExecutor,
+    supported_host_abi_versions, verify_wasm_host_abi_bytes,
+};
 
 use serde_json::Value;
 
@@ -34,6 +37,8 @@ pub struct ExecutorCapability {
     pub wasm_binary_path: Option<String>,
     /// Expected SHA-256 hex digest of the WASM binary (only relevant for `ArtifactType::Wasm`).
     pub wasm_checksum: Option<String>,
+    /// Traverse Host ABI version declared by the module manifest.
+    pub host_abi_version: Option<String>,
 }
 
 /// Error returned by a [`CapabilityExecutor`].
@@ -45,6 +50,21 @@ pub enum ExecutorError {
     ChecksumMismatch { expected: String, actual: String },
     /// The Wasmtime engine or linker could not be configured.
     RuntimeSetupFailed(String),
+    /// The WASM artifact is malformed and cannot be parsed as a module.
+    MalformedWasmArtifact { error_code: String, detail: String },
+    /// The WASM artifact declares an unsupported Traverse Host ABI version.
+    UnsupportedAbiVersion {
+        error_code: String,
+        requested: String,
+        supported: String,
+    },
+    /// The WASM artifact imports a host function outside the declared ABI whitelist.
+    UnauthorizedHostImport {
+        error_code: String,
+        abi_version: String,
+        module: String,
+        name: String,
+    },
     /// The WASM module trapped or returned a non-zero exit code.
     ExecutionFailed(String),
     /// The executor produced output that could not be parsed as JSON.
@@ -61,6 +81,26 @@ impl std::fmt::Display for ExecutorError {
                 write!(f, "checksum mismatch: expected {expected}, got {actual}")
             }
             Self::RuntimeSetupFailed(msg) => write!(f, "runtime setup failed: {msg}"),
+            Self::MalformedWasmArtifact { error_code, detail } => {
+                write!(f, "{error_code}: {detail}")
+            }
+            Self::UnsupportedAbiVersion {
+                error_code,
+                requested,
+                supported,
+            } => write!(
+                f,
+                "{error_code}: requested Traverse Host ABI {requested}, supported {supported}"
+            ),
+            Self::UnauthorizedHostImport {
+                error_code,
+                abi_version,
+                module,
+                name,
+            } => write!(
+                f,
+                "{error_code}: ABI {abi_version} does not allow import {module}::{name}"
+            ),
             Self::ExecutionFailed(msg) => write!(f, "execution failed: {msg}"),
             Self::OutputDeserializationFailed(msg) => {
                 write!(f, "output deserialization failed: {msg}")

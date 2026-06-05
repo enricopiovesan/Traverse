@@ -10,6 +10,7 @@ use traverse_registry::{
     CapabilityRegistration, ComposabilityMetadata, CompositionKind, CompositionPattern,
     ImplementationKind, RegistryProvenance, RegistryScope, SourceKind, SourceReference,
 };
+use traverse_runtime::executor::SUPPORTED_HOST_ABI_VERSION;
 
 const AGENT_PACKAGE_KIND: &str = "agent_package";
 const AGENT_PACKAGE_SCHEMA_VERSION: &str = "1.0.0";
@@ -67,6 +68,7 @@ pub struct AgentBinaryReference {
     pub path: String,
     pub format: String,
     pub expected_digest: String,
+    pub abi_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -308,6 +310,11 @@ fn validate_manifest_shape(
         return Err(
             "agent package binary.path and binary.expected_digest must be non-empty".to_string(),
         );
+    }
+    if manifest.binary.abi_version != SUPPORTED_HOST_ABI_VERSION {
+        return Err(format!(
+            "agent package binary.abi_version must equal {SUPPORTED_HOST_ABI_VERSION}"
+        ));
     }
     if manifest.binary.format != "wasm" {
         return Err("agent package binary.format must equal wasm".to_string());
