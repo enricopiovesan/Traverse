@@ -26,6 +26,7 @@ use traverse_registry::{
     WorkflowDefinition, WorkflowReference, WorkflowRegistration, WorkflowRegistry,
     load_registry_bundle,
 };
+use traverse_runtime::executor::{SUPPORTED_HOST_ABI_VERSION, verify_wasm_host_abi_bytes};
 use traverse_runtime::{
     LocalExecutionFailure, LocalExecutionFailureCode, LocalExecutor, Runtime,
     RuntimeExecutionOutcome, RuntimeRequest, RuntimeResultStatus, RuntimeTrace,
@@ -51,6 +52,9 @@ enum Command {
     AgentExecute {
         manifest_path: PathBuf,
         request_path: PathBuf,
+    },
+    WasmAbiVerify {
+        wasm_paths: Vec<PathBuf>,
     },
     FederationPeers {
         manifest_path: PathBuf,
@@ -197,6 +201,7 @@ fn run_command(command: Command) -> Result<String, CliError> {
             manifest_path,
             request_path,
         } => execute_agent(&manifest_path, &request_path),
+        Command::WasmAbiVerify { wasm_paths } => verify_wasm_abi_imports(&wasm_paths),
         Command::FederationPeers { manifest_path } => {
             render_federation_peers(&manifest_path).map_err(CliError::IoError)
         }
@@ -258,6 +263,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         (Some("serve"), _) => parse_serve_command(args),
         (Some("federation"), Some(_)) => parse_federation_command(args),
         (Some("agent"), Some("execute")) => parse_agent_execute_command(args),
+        (Some("wasm"), Some("abi")) => parse_wasm_abi_command(args),
         (Some("expedition"), Some("execute")) => parse_expedition_execute_command(args),
         (Some("capability"), Some("discover")) => parse_capability_discover_command(args),
         (Some("workflow"), Some(_)) => parse_workflow_command(args),
@@ -273,6 +279,8 @@ fn subcommand_help(family: Option<&str>, subcommand: Option<&str>) -> String {
         (Some("agent"), Some("inspect")) => help_agent_inspect(),
         (Some("agent"), Some("execute")) => help_agent_execute(),
         (Some("agent"), _) => help_agent(),
+        (Some("wasm"), Some("abi")) => help_wasm_abi(),
+        (Some("wasm"), _) => help_wasm(),
         (Some("workflow"), Some("register")) => help_workflow_register(),
         (Some("workflow"), Some("list")) => help_workflow_list(),
         (Some("workflow"), Some("inspect")) => help_workflow_inspect(),
@@ -391,6 +399,35 @@ fn help_agent() -> String {
     execute <manifest-path> <request-path>       Execute an agent against a runtime request.
 
   Run `traverse-cli agent <subcommand> --help` for subcommand-specific help."
+        .to_string()
+}
+
+fn help_wasm_abi() -> String {
+    "traverse-cli wasm abi verify <wasm-path>...
+
+  Purpose:
+    Validate one or more compiled WASM artifacts against the Traverse Host ABI
+    v1 import whitelist before publication. Fails if any artifact imports a
+    host function outside the governed ABI surface.
+
+  Required arguments:
+    <wasm-path>...   One or more .wasm files to validate.
+
+  Optional flags:
+    --help           Print this help text.
+
+  Example:
+    traverse-cli wasm abi verify examples/hello-world/say-hello-agent/artifacts/say-hello-agent.wasm"
+        .to_string()
+}
+
+fn help_wasm() -> String {
+    "traverse-cli wasm <subcommand> [options]
+
+  Subcommands:
+    abi verify <wasm-path>...   Validate WASM host imports against Traverse Host ABI v1.
+
+  Run `traverse-cli wasm abi --help` for subcommand-specific help."
         .to_string()
 }
 
@@ -797,6 +834,20 @@ fn parse_agent_execute_command(args: &[String]) -> Result<Command, String> {
     }
 }
 
+fn parse_wasm_abi_command(args: &[String]) -> Result<Command, String> {
+    match args {
+        [_, _, abi, verify, wasm_paths @ ..] if abi == "abi" && verify == "verify" => {
+            if wasm_paths.is_empty() {
+                return Err(usage());
+            }
+            Ok(Command::WasmAbiVerify {
+                wasm_paths: wasm_paths.iter().map(PathBuf::from).collect(),
+            })
+        }
+        _ => Err(usage()),
+    }
+}
+
 fn parse_federation_command(args: &[String]) -> Result<Command, String> {
     match args {
         [_, _, _, manifest_path] if args[2] == "peers" => Ok(Command::FederationPeers {
@@ -987,6 +1038,30 @@ fn execute_agent(manifest_path: &Path, request_path: &Path) -> Result<String, Cl
         &package.manifest.capability_ref.id,
         &outcome,
     ))
+}
+
+fn verify_wasm_abi_imports(wasm_paths: &[PathBuf]) -> Result<String, CliError> {
+    let mut lines = Vec::new();
+    for wasm_path in wasm_paths {
+        let wasm_bytes = fs::read(wasm_path).map_err(|error| {
+            CliError::IoError(format!(
+                "failed to read WASM artifact {}: {error}",
+                wasm_path.display()
+            ))
+        })?;
+        let validation = verify_wasm_host_abi_bytes(&wasm_bytes, SUPPORTED_HOST_ABI_VERSION)
+            .map_err(|error| {
+                CliError::ValidationFailed(format!("{}: {error}", wasm_path.display()))
+            })?;
+        lines.push(format!(
+            "{}: ABI {} import whitelist passed ({} imports)",
+            wasm_path.display(),
+            validation.abi_version,
+            validation.imports.len()
+        ));
+    }
+
+    Ok(lines.join("\n"))
 }
 
 fn execute_expedition(
@@ -2345,6 +2420,13 @@ mod tests {
             "examples/agents/expedition-intent-agent/manifest.json".to_string(),
             "examples/agents/runtime-requests/interpret-expedition-intent.json".to_string(),
         ];
+        let wasm_abi_verify = vec![
+            "traverse-cli".to_string(),
+            "wasm".to_string(),
+            "abi".to_string(),
+            "verify".to_string(),
+            "examples/hello-world/say-hello-agent/artifacts/say-hello-agent.wasm".to_string(),
+        ];
         let expedition_execute = vec![
             "traverse-cli".to_string(),
             "expedition".to_string(),
@@ -2383,6 +2465,7 @@ mod tests {
         assert!(parse_command(&bundle_register).is_ok());
         assert!(parse_command(&agent_inspect).is_ok());
         assert!(parse_command(&agent_execute).is_ok());
+        assert!(parse_command(&wasm_abi_verify).is_ok());
         assert!(parse_command(&expedition_execute).is_ok());
         assert!(parse_command(&expedition_execute_with_trace).is_ok());
         assert!(parse_command(&event).is_ok());
@@ -3176,7 +3259,8 @@ mod tests {
   "binary": {{
     "path": "./artifacts/{}",
     "format": "wasm",
-    "expected_digest": "{}"
+    "expected_digest": "{}",
+    "abi_version": "1.0.0"
   }},
   "constraints": {{
     "host_api_access": "none",

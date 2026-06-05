@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0.0",
+  "abi_version": "1.0.0",
+  "target": "wasm32-wasip1",
+  "imports": [
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_read",
+      "category": "stdio"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "fd_write",
+      "category": "stdio"
+    },
+    {
+      "module": "wasi_snapshot_preview1",
+      "name": "proc_exit",
+      "category": "stdio"
+    },
+    {
+      "module": "traverse_host",
+      "name": "capability_id",
+      "category": "environment_query"
+    },
+    {
+      "module": "traverse_host",
+      "name": "capability_version",
+      "category": "environment_query"
+    },
+    {
+      "module": "traverse_host",
+      "name": "runtime_config",
+      "category": "environment_query"
+    },
+    {
+      "module": "traverse_host",
+      "name": "trace_context",
+      "category": "execution_metadata"
+    },
+    {
+      "module": "traverse_host",
+      "name": "execution_id",
+      "category": "execution_metadata"
+    }
+  ]
+}

@@ -114,6 +114,7 @@ fn native_executor_capability(capability_id: &str) -> ExecutorCapability {
         artifact_type: ArtifactType::Native,
         wasm_binary_path: None,
         wasm_checksum: None,
+        host_abi_version: None,
     }
 }
 

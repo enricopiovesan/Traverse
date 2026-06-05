@@ -4,6 +4,7 @@
 //! Input is fed via WASI stdin; output is captured from WASI stdout.
 //! No ambient WASI authority is granted — all capabilities are deny-by-default.
 
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -13,6 +14,67 @@ use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 
 use super::{ArtifactType, CapabilityExecutor, ExecutorCapability, ExecutorError};
+
+/// Traverse Host ABI v1 is independently versioned from the runtime crate.
+pub const SUPPORTED_HOST_ABI_VERSION: &str = "1.0.0";
+
+const HOST_ABI_V1_WHITELIST: &str = include_str!("host_abi_v1.json");
+
+/// A host import observed in a WASM module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostAbiImport {
+    /// Imported module namespace.
+    pub module: String,
+    /// Imported function or item name.
+    pub name: String,
+}
+
+/// Successful load-time ABI validation evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostAbiValidation {
+    /// ABI version used for whitelist validation.
+    pub abi_version: String,
+    /// All imports observed in deterministic module/name order.
+    pub imports: Vec<HostAbiImport>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostAbiWhitelist {
+    abi_version: String,
+    imports: Vec<HostAbiWhitelistImport>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostAbiWhitelistImport {
+    module: String,
+    name: String,
+}
+
+/// Return the Traverse Host ABI versions supported by this runtime.
+#[must_use]
+pub fn supported_host_abi_versions() -> &'static [&'static str] {
+    &[SUPPORTED_HOST_ABI_VERSION]
+}
+
+/// Validate a WASM binary against the declared Traverse Host ABI import whitelist.
+///
+/// # Errors
+///
+/// Returns [`ExecutorError`] when the binary is malformed, the ABI version is unsupported,
+/// or a module imports a host function outside the whitelist.
+pub fn verify_wasm_host_abi_bytes(
+    wasm_bytes: &[u8],
+    abi_version: &str,
+) -> Result<HostAbiValidation, ExecutorError> {
+    let engine = Engine::default();
+    let module = Module::from_binary(&engine, wasm_bytes).map_err(|e| {
+        ExecutorError::MalformedWasmArtifact {
+            error_code: "malformed_wasm_artifact".to_string(),
+            detail: format!("module compile: {e}"),
+        }
+    })?;
+    validate_module_imports(&module, abi_version)
+}
 
 /// Executes `.wasm32-wasi` capability binaries via Wasmtime.
 ///
@@ -64,7 +126,12 @@ impl CapabilityExecutor for WasmExecutor {
             }
         }
 
-        self.run_wasm(&binary, input)
+        let abi_version = capability
+            .host_abi_version
+            .as_deref()
+            .unwrap_or(SUPPORTED_HOST_ABI_VERSION);
+
+        self.run_wasm(&binary, input, abi_version)
     }
 }
 
@@ -78,12 +145,39 @@ impl WasmExecutor {
     /// Returns [`ExecutorError`] if input serialization fails, the WASM module cannot be
     /// compiled or linked, execution fails, or stdout is not valid JSON.
     pub fn run_bytes(&self, wasm_bytes: &[u8], input: &Value) -> Result<Value, ExecutorError> {
-        self.run_wasm(wasm_bytes, input)
+        self.run_bytes_with_host_abi(wasm_bytes, input, SUPPORTED_HOST_ABI_VERSION)
     }
 
-    fn run_wasm(&self, wasm_bytes: &[u8], input: &Value) -> Result<Value, ExecutorError> {
+    /// Execute pre-loaded WASM bytes with an explicit Traverse Host ABI version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecutorError`] if ABI validation fails or execution cannot complete.
+    pub fn run_bytes_with_host_abi(
+        &self,
+        wasm_bytes: &[u8],
+        input: &Value,
+        abi_version: &str,
+    ) -> Result<Value, ExecutorError> {
+        self.run_wasm(wasm_bytes, input, abi_version)
+    }
+
+    fn run_wasm(
+        &self,
+        wasm_bytes: &[u8],
+        input: &Value,
+        abi_version: &str,
+    ) -> Result<Value, ExecutorError> {
         let input_json = serde_json::to_string(input)
             .map_err(|e| ExecutorError::ExecutionFailed(format!("input serialization: {e}")))?;
+
+        let module = Module::from_binary(&self.engine, wasm_bytes).map_err(|e| {
+            ExecutorError::MalformedWasmArtifact {
+                error_code: "malformed_wasm_artifact".to_string(),
+                detail: format!("module compile: {e}"),
+            }
+        })?;
+        validate_module_imports(&module, abi_version)?;
 
         // Clone pipe reference before passing to builder — needed to read output after execution
         let stdout_pipe = MemoryOutputPipe::new(65536);
@@ -101,9 +195,6 @@ impl WasmExecutor {
             .map_err(|e| ExecutorError::RuntimeSetupFailed(e.to_string()))?;
 
         let mut store: Store<WasiP1Ctx> = Store::new(&self.engine, wasi_ctx);
-
-        let module = Module::from_binary(&self.engine, wasm_bytes)
-            .map_err(|e| ExecutorError::RuntimeSetupFailed(format!("module compile: {e}")))?;
 
         linker
             .module(&mut store, "", &module)
@@ -133,4 +224,52 @@ fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
+}
+
+fn validate_module_imports(
+    module: &Module,
+    abi_version: &str,
+) -> Result<HostAbiValidation, ExecutorError> {
+    let whitelist = host_abi_whitelist(abi_version)?;
+    let mut imports = module
+        .imports()
+        .map(|import| HostAbiImport {
+            module: import.module().to_string(),
+            name: import.name().to_string(),
+        })
+        .collect::<Vec<_>>();
+    imports.sort_by(|a, b| a.module.cmp(&b.module).then_with(|| a.name.cmp(&b.name)));
+
+    for import in &imports {
+        if !whitelist
+            .imports
+            .iter()
+            .any(|allowed| allowed.module == import.module && allowed.name == import.name)
+        {
+            return Err(ExecutorError::UnauthorizedHostImport {
+                error_code: "unauthorized_host_import".to_string(),
+                abi_version: abi_version.to_string(),
+                module: import.module.clone(),
+                name: import.name.clone(),
+            });
+        }
+    }
+
+    Ok(HostAbiValidation {
+        abi_version: whitelist.abi_version,
+        imports,
+    })
+}
+
+fn host_abi_whitelist(abi_version: &str) -> Result<HostAbiWhitelist, ExecutorError> {
+    if abi_version != SUPPORTED_HOST_ABI_VERSION {
+        return Err(ExecutorError::UnsupportedAbiVersion {
+            error_code: "unsupported_abi_version".to_string(),
+            requested: abi_version.to_string(),
+            supported: supported_host_abi_versions().join(", "),
+        });
+    }
+
+    serde_json::from_str::<HostAbiWhitelist>(HOST_ABI_V1_WHITELIST)
+        .map_err(|e| ExecutorError::RuntimeSetupFailed(format!("invalid ABI whitelist: {e}")))
 }

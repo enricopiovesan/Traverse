@@ -79,6 +79,7 @@ required_files=(
   "scripts/ci/app_consumable_package_release_pointer.sh"
   "scripts/ci/wasm_agent_authoring_guide_smoke.sh"
   "scripts/ci/hello_world_example_smoke.sh"
+  "scripts/ci/wasi_host_abi_imports.sh"
   "scripts/ci/zero_to_hero_acceptance.sh"
   "scripts/ci/wasm_microservice_authoring_guide_smoke.sh"
   "scripts/ci/downstream_publication_strategy_smoke.sh"
@@ -351,5 +352,8 @@ grep -q "## Governing Spec" .github/pull_request_template.md
 
 echo "Running new-capability scaffold smoke..."
 TRAVERSE_REPO_ROOT="$(pwd)" bash "$(pwd)/scripts/ci/new_capability_scaffold_smoke.sh"
+
+echo "Running WASI host ABI import whitelist verification..."
+TRAVERSE_REPO_ROOT="$(pwd)" bash "$(pwd)/scripts/ci/wasi_host_abi_imports.sh"
 
 echo "Repository checks passed."

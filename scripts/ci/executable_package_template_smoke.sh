@@ -22,6 +22,7 @@ grep -q '"capability_ref"' "$manifest_path"
 grep -q '"workflow_refs"' "$manifest_path"
 grep -q '"model_dependencies"' "$manifest_path"
 grep -q '"expected_digest": "fnv1a64:dffc31d6401c84d6"' "$manifest_path"
+grep -q '"abi_version": "1.0.0"' "$manifest_path"
 grep -q 'printf' "$build_script"
 
 printf 'Executable package template smoke passed.\n'
