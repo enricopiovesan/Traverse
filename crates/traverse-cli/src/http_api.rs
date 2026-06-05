@@ -621,6 +621,13 @@ fn workspace_metadata_path(registry_root: &Path, workspace_id: &str) -> PathBuf 
         .join("workspace.json")
 }
 
+fn workspace_audit_log_path(registry_root: &Path, workspace_id: &str) -> PathBuf {
+    registry_root
+        .join("workspaces")
+        .join(workspace_id)
+        .join("audit.jsonl")
+}
+
 fn persist_registry(
     registry_root: &Path,
     workspace_id: &str,
@@ -640,6 +647,60 @@ fn persist_registry(
     std::fs::rename(&tmp, &path)
         .map_err(|e| format!("failed to atomically replace persisted registry: {e}"))?;
     Ok(())
+}
+
+fn append_workspace_audit<E: LocalExecutor + Clone>(
+    state: &ApiState<E>,
+    workspace_id: &str,
+    entry: &Value,
+) -> Result<(), String> {
+    let path = workspace_audit_log_path(&state.registry_root, workspace_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create audit log directory: {e}"))?;
+    }
+    let line =
+        serde_json::to_string(entry).map_err(|e| format!("failed to serialize audit log: {e}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("failed to open audit log: {e}"))?;
+    writeln!(file, "{line}").map_err(|e| format!("failed to append audit log: {e}"))
+}
+
+fn audit_workspace_event<E: LocalExecutor + Clone>(
+    state: &ApiState<E>,
+    workspace_id: &str,
+    event_type: &str,
+    identity: Option<&DerivedIdentity>,
+    target_resource: Option<&str>,
+    outcome: &str,
+    traverse_code: Option<&str>,
+) -> Result<(), String> {
+    let mut entry = json!({
+        "timestamp": generated_registered_at().map_err(|e| e.message)?,
+        "workspace_id": workspace_id,
+        "event_type": event_type,
+        "outcome": outcome,
+    });
+    if let Some(identity) = identity {
+        entry["subject_id"] = Value::String(identity.subject_id.clone());
+        entry["effective_scopes"] = Value::Array(
+            identity
+                .scopes
+                .iter()
+                .map(|scope| Value::String(scope.clone()))
+                .collect(),
+        );
+    }
+    if let Some(target_resource) = target_resource {
+        entry["target_resource"] = Value::String(target_resource.to_string());
+    }
+    if let Some(traverse_code) = traverse_code {
+        entry["traverse_code"] = Value::String(traverse_code.to_string());
+    }
+    append_workspace_audit(state, workspace_id, &entry)
 }
 
 fn render_registry_failure_as_string(failure: traverse_registry::RegistryFailure) -> String {
@@ -2696,19 +2757,38 @@ fn active_runtime_grants_for_execution<E: LocalExecutor + Clone>(
     capability_id: Option<&str>,
 ) -> Result<Vec<RuntimeGrantRecord>, String> {
     let now = current_unix_seconds().map_err(|e| e.message)?;
-    state.with_workspace_mut(workspace_id, |ws| {
-        ws.runtime_grants
-            .retain(|grant| grant_expiration_seconds(grant).is_none_or(|expires| expires > now));
+    let (active, expired) = state.with_workspace_mut(workspace_id, |ws| {
+        let mut expired = Vec::new();
+        ws.runtime_grants.retain(|grant| {
+            if grant_expiration_seconds(grant).is_some_and(|expires| expires <= now) {
+                expired.push(grant.clone());
+                return false;
+            }
+            true
+        });
         let Some(capability_id) = capability_id else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), expired));
         };
-        Ok(ws
+        let active = ws
             .runtime_grants
             .iter()
             .filter(|grant| grant.capability_id == capability_id)
             .cloned()
-            .collect())
-    })
+            .collect();
+        Ok((active, expired))
+    })?;
+    for grant in expired {
+        audit_workspace_event(
+            state,
+            workspace_id,
+            "runtime_grant_expired",
+            None,
+            Some(&grant.grant_id),
+            "expired",
+            None,
+        )?;
+    }
+    Ok(active)
 }
 
 fn consume_execution_runtime_grants<E: LocalExecutor + Clone>(
@@ -2728,7 +2808,21 @@ fn consume_execution_runtime_grants<E: LocalExecutor + Clone>(
         ws.runtime_grants
             .retain(|grant| !consumed.contains(grant.grant_id.as_str()));
         Ok(())
-    })
+    })?;
+    for grant in execution_grants {
+        if grant.lifetime == RuntimeGrantLifetime::Execution {
+            audit_workspace_event(
+                state,
+                workspace_id,
+                "runtime_grant_revoked",
+                None,
+                Some(&grant.grant_id),
+                "revoked",
+                None,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn grant_expiration_seconds(grant: &RuntimeGrantRecord) -> Option<u64> {
@@ -3155,6 +3249,15 @@ fn handle_list_capabilities<W: Write, E: LocalExecutor + Clone>(
         match subject_from_request(&request.headers, state.allow_unauthenticated, loopback) {
             Ok(identity) => identity,
             Err(err) => {
+                audit_workspace_event(
+                    state,
+                    &workspace_id,
+                    "auth_failure",
+                    None,
+                    Some("registry_read"),
+                    "failure",
+                    Some(err.code),
+                )?;
                 return write_json(
                     w,
                     err.status,
@@ -3173,6 +3276,15 @@ fn handle_list_capabilities<W: Write, E: LocalExecutor + Clone>(
     ) {
         Ok(metadata) => metadata,
         Err(err) => {
+            audit_workspace_event(
+                state,
+                &workspace_id,
+                "auth_failure",
+                Some(&identity),
+                Some("registry_read"),
+                "failure",
+                Some(err.code),
+            )?;
             return write_json(
                 w,
                 err.status,
@@ -3246,6 +3358,15 @@ fn handle_register_capability<W: Write, E: LocalExecutor + Clone>(
     ) {
         Ok(metadata) => metadata,
         Err(err) => {
+            audit_workspace_event(
+                state,
+                &workspace_id,
+                "auth_failure",
+                Some(&identity),
+                Some("capability_registration"),
+                "failure",
+                Some(err.code),
+            )?;
             return write_json(
                 w,
                 err.status,
@@ -3340,6 +3461,19 @@ fn handle_register_workspace_capability<W: Write, E: LocalExecutor + Clone>(
                 );
             }
         };
+    let target_resource = format!(
+        "capability:{}@{}",
+        persisted_registration.contract.id, persisted_registration.contract.version
+    );
+    audit_workspace_event(
+        state,
+        workspace_id,
+        "registration_attempted",
+        Some(&identity),
+        Some(&target_resource),
+        "attempted",
+        None,
+    )?;
 
     let _ = match ensure_workspace_authorized(
         &state.registry_root,
@@ -3350,6 +3484,15 @@ fn handle_register_workspace_capability<W: Write, E: LocalExecutor + Clone>(
     ) {
         Ok(metadata) => metadata,
         Err(err) => {
+            audit_workspace_event(
+                state,
+                workspace_id,
+                "auth_failure",
+                Some(&identity),
+                Some(&target_resource),
+                "failure",
+                Some(err.code),
+            )?;
             return write_json(
                 w,
                 err.status,
@@ -3371,19 +3514,49 @@ fn handle_register_workspace_capability<W: Write, E: LocalExecutor + Clone>(
         }
     };
 
-    match apply_registration(
+    let result = apply_registration(
         state,
         workspace_id,
         scope,
         persisted_registration,
         registration,
-    )? {
+    )?;
+    write_workspace_capability_registration_result(
+        w,
+        state,
+        workspace_id,
+        &identity,
+        scope,
+        &target_resource,
+        result,
+    )
+}
+
+fn write_workspace_capability_registration_result<W: Write, E: LocalExecutor + Clone>(
+    w: &mut W,
+    state: &ApiState<E>,
+    workspace_id: &str,
+    identity: &DerivedIdentity,
+    scope: RegistrationScope,
+    target_resource: &str,
+    result: Result<traverse_registry::RegistrationOutcome, traverse_registry::RegistryFailure>,
+) -> Result<(), String> {
+    match result {
         Ok(outcome) => {
             let status = if outcome.already_registered { 200 } else { 201 };
             let scope_name = match scope {
                 RegistrationScope::WorkspacePersisted => "workspace_persisted",
                 RegistrationScope::SessionEphemeral => "session_ephemeral",
             };
+            audit_workspace_event(
+                state,
+                workspace_id,
+                "registration_outcome",
+                Some(identity),
+                Some(target_resource),
+                "success",
+                None,
+            )?;
             write_json(
                 w,
                 status,
@@ -3410,6 +3583,15 @@ fn handle_register_workspace_capability<W: Write, E: LocalExecutor + Clone>(
         }
         Err(failure) => {
             let (status, code, reason) = map_registry_failure_http(&failure);
+            audit_workspace_event(
+                state,
+                workspace_id,
+                "registration_outcome",
+                Some(identity),
+                Some(target_resource),
+                "failure",
+                Some(code),
+            )?;
             write_json(
                 w,
                 status,
@@ -3711,6 +3893,15 @@ fn handle_approve_runtime_grant<W: Write, E: LocalExecutor + Clone>(
         match subject_from_request(&request.headers, state.allow_unauthenticated, loopback) {
             Ok(identity) => identity,
             Err(err) => {
+                audit_workspace_event(
+                    state,
+                    workspace_id,
+                    "auth_failure",
+                    None,
+                    Some("runtime_grants"),
+                    "failure",
+                    Some(err.code),
+                )?;
                 return write_json(
                     w,
                     err.status,
@@ -3729,6 +3920,15 @@ fn handle_approve_runtime_grant<W: Write, E: LocalExecutor + Clone>(
     ) {
         Ok(metadata) => metadata,
         Err(err) => {
+            audit_workspace_event(
+                state,
+                workspace_id,
+                "auth_failure",
+                Some(&identity),
+                Some("runtime_grants"),
+                "failure",
+                Some(err.code),
+            )?;
             return write_json(
                 w,
                 err.status,
@@ -3750,6 +3950,15 @@ fn handle_approve_runtime_grant<W: Write, E: LocalExecutor + Clone>(
         }
     };
     let grant = approve_runtime_grant(state, workspace_id, &identity, grant)?;
+    audit_workspace_event(
+        state,
+        workspace_id,
+        "runtime_grant_created",
+        Some(&identity),
+        Some(&grant.grant_id),
+        "created",
+        None,
+    )?;
 
     write_json(
         w,
@@ -3881,6 +4090,15 @@ fn handle_execute_workspace<W: Write, E: LocalExecutor + Clone>(
         match subject_from_request(&request.headers, state.allow_unauthenticated, loopback) {
             Ok(identity) => identity,
             Err(err) => {
+                audit_workspace_event(
+                    state,
+                    workspace_id,
+                    "auth_failure",
+                    None,
+                    Some("workspace_execute"),
+                    "failure",
+                    Some(err.code),
+                )?;
                 return write_json(
                     w,
                     err.status,
@@ -3899,6 +4117,15 @@ fn handle_execute_workspace<W: Write, E: LocalExecutor + Clone>(
     ) {
         Ok(metadata) => metadata,
         Err(err) => {
+            audit_workspace_event(
+                state,
+                workspace_id,
+                "auth_failure",
+                Some(&identity),
+                Some("workspace_execute"),
+                "failure",
+                Some(err.code),
+            )?;
             return write_json(
                 w,
                 err.status,
@@ -3963,6 +4190,17 @@ fn handle_sync_workspace_execution<W: Write, E: LocalExecutor + Clone>(
         &outcome.result.execution_id,
         outcome.trace.clone(),
     )?;
+    for grant in &runtime_grants {
+        audit_workspace_event(
+            state,
+            workspace_id,
+            "runtime_grant_used",
+            None,
+            Some(&grant.grant_id),
+            "used",
+            None,
+        )?;
+    }
 
     let body = json!({
         "api_version": "v1",
@@ -5383,6 +5621,21 @@ mod tests {
         .into_bytes()
     }
 
+    fn audit_log_text<E: LocalExecutor + Clone>(state: &ApiState<E>, workspace_id: &str) -> String {
+        std::fs::read_to_string(workspace_audit_log_path(&state.registry_root, workspace_id))
+            .expect("audit log must be readable")
+    }
+
+    fn audit_log_entries<E: LocalExecutor + Clone>(
+        state: &ApiState<E>,
+        workspace_id: &str,
+    ) -> Vec<Value> {
+        audit_log_text(state, workspace_id)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("audit entry must be json"))
+            .collect()
+    }
+
     fn test_state_with(id: &str, version: &str) -> ApiState<TestExecutor> {
         let mut registry = CapabilityRegistry::new();
         registry
@@ -6210,6 +6463,87 @@ mod tests {
     }
 
     #[test]
+    fn runtime_grant_lifecycle_writes_secret_free_audit_entries() {
+        let state = test_state_with("test.api.do-something", "1.0.0");
+        persist_test_workspace(&state.registry_root, "ws-test", "alice");
+        let approve_token = make_scoped_jwt("alice", future_exp(), &["grants:approve"]);
+        let approve_req = with_bearer(
+            make_http_request(
+                "POST",
+                "/v1/workspaces/ws-test/runtime-grants",
+                runtime_grant_body(
+                    "test.api.do-something",
+                    "external.api.read",
+                    "resource:one",
+                    "execution",
+                    3600,
+                ),
+            ),
+            &approve_token,
+        );
+        let mut approve_out = Vec::new();
+        handle_workspace_operation(&mut approve_out, &approve_req, &state, false)
+            .expect("grant approval must write a response");
+        assert_eq!(response_status(&approve_out), 201);
+
+        let execute_token = make_scoped_jwt("alice", future_exp(), &["runtime:execute"]);
+        let execute_req = with_bearer(
+            make_http_request(
+                "POST",
+                "/v1/workspaces/ws-test/execute",
+                make_runtime_request_body("test.api.do-something"),
+            ),
+            &execute_token,
+        );
+        let mut execute_out = Vec::new();
+        handle_workspace_operation(&mut execute_out, &execute_req, &state, false)
+            .expect("execute must write a response");
+        assert_eq!(response_status(&execute_out), 200);
+
+        let text = audit_log_text(&state, "ws-test");
+        assert!(!text.contains(&approve_token));
+        assert!(!text.contains(&execute_token));
+        let event_types: Vec<String> = audit_log_entries(&state, "ws-test")
+            .iter()
+            .filter_map(|entry| entry["event_type"].as_str().map(ToString::to_string))
+            .collect();
+        assert!(event_types.contains(&"runtime_grant_created".to_string()));
+        assert!(event_types.contains(&"runtime_grant_used".to_string()));
+        assert!(event_types.contains(&"runtime_grant_revoked".to_string()));
+    }
+
+    #[test]
+    fn auth_failure_writes_secret_free_audit_entry() {
+        let state = empty_state();
+        persist_test_workspace(&state.registry_root, "ws-test", "alice");
+        let token = make_scoped_jwt("alice", future_exp(), &["runtime:execute"]);
+        let req = with_bearer(
+            make_http_request(
+                "POST",
+                "/v1/workspaces/ws-test/runtime-grants",
+                runtime_grant_body(
+                    "test.api.do-something",
+                    "external.api.read",
+                    "resource:one",
+                    "execution",
+                    3600,
+                ),
+            ),
+            &token,
+        );
+        let mut out = Vec::new();
+        handle_workspace_operation(&mut out, &req, &state, false)
+            .expect("grant approval must write a response");
+
+        assert_eq!(response_status(&out), 403);
+        let text = audit_log_text(&state, "ws-test");
+        assert!(!text.contains(&token));
+        let entries = audit_log_entries(&state, "ws-test");
+        assert_eq!(entries[0]["event_type"], "auth_failure");
+        assert_eq!(entries[0]["traverse_code"], "unauthorized");
+    }
+
+    #[test]
     fn system_workspace_requires_privileged_claim() {
         let state = empty_state();
         let req = with_bearer(
@@ -6766,6 +7100,35 @@ mod tests {
             .expect("workspace execute must write a response");
         let executed = parse_response_body(&execute_out);
         assert_eq!(executed["status"], "succeeded");
+    }
+
+    #[test]
+    fn workspace_capability_registration_writes_audit_jsonl() {
+        let state = empty_state();
+        let artifact_path = state.registry_root.join("audit-module.wasm");
+        std::fs::write(&artifact_path, b"wasm bytes").expect("artifact must be writable");
+        let req = make_http_request(
+            "POST",
+            "/v1/workspaces/ws-test/capabilities",
+            valid_registration_body("test.api.audited", "1.0.0", &artifact_path),
+        );
+
+        let mut out = Vec::new();
+        handle_workspace_operation(&mut out, &req, &state, true)
+            .expect("workspace registration must write a response");
+
+        assert_eq!(response_status(&out), 201);
+        let entries = audit_log_entries(&state, "ws-test");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["event_type"], "registration_attempted");
+        assert_eq!(entries[0]["workspace_id"], "ws-test");
+        assert_eq!(entries[0]["subject_id"], "local");
+        assert_eq!(entries[1]["event_type"], "registration_outcome");
+        assert_eq!(entries[1]["outcome"], "success");
+        assert_eq!(
+            entries[1]["target_resource"],
+            "capability:test.api.audited@1.0.0"
+        );
     }
 
     #[test]
