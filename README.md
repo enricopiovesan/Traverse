@@ -208,6 +208,7 @@ Traverse is spec-driven. Code must align with an approved, immutable spec or it 
 - [docs/app-consumable-consumer-bundle.md](docs/app-consumable-consumer-bundle.md) — versioned consumer bundle
 - [docs/app-consumable-package-release-pointer.md](docs/app-consumable-package-release-pointer.md) — package release pointer
 - [docs/adapter-boundaries.md](docs/adapter-boundaries.md) — adapter and portability boundaries
+- [docs/youaskm3-canonical-mcp-client-path.md](docs/youaskm3-canonical-mcp-client-path.md) — canonical v0.3.0 MCP client path for youaskm3
 - [docs/mcp-stdio-server.md](docs/mcp-stdio-server.md) — supported MCP server bootstrap path and command surface
 - [docs/wasm-agent-authoring-guide.md](docs/wasm-agent-authoring-guide.md) — how to create new WASM agents
 - [docs/wasm-agent-team-readiness-example.md](docs/wasm-agent-team-readiness-example.md) — second governed WASM AI agent example
@@ -219,6 +220,7 @@ Traverse is spec-driven. Code must align with an approved, immutable spec or it 
 - [docs/app-consumable-consumer-bundle.md](docs/app-consumable-consumer-bundle.md) — versioned consumer bundle
 - [docs/app-consumable-package-release-pointer.md](docs/app-consumable-package-release-pointer.md) — package release pointer
 - [docs/event-publishing-tutorial.md](docs/event-publishing-tutorial.md) — how to emit and receive governed events from a capability
+- [docs/youaskm3-canonical-mcp-client-path.md](docs/youaskm3-canonical-mcp-client-path.md) — release-facing MCP client path for youaskm3
 - [docs/packaged-traverse-runtime-artifact.md](docs/packaged-traverse-runtime-artifact.md) — packaged runtime artifact
 - [docs/packaged-traverse-mcp-server-artifact.md](docs/packaged-traverse-mcp-server-artifact.md) — packaged MCP server artifact
 - [docs/youaskm3-integration-validation.md](docs/youaskm3-integration-validation.md) — youaskm3 integration validation

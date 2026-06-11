@@ -21,6 +21,7 @@ required_files=(
   "docs/expedition-example-smoke.md"
   "docs/mcp-consumption-validation.md"
   "docs/mcp-stdio-server.md"
+  "docs/youaskm3-canonical-mcp-client-path.md"
   "docs/mcp-real-agent-exercise.md"
   "docs/app-consumable-release-checklist.md"
   "docs/app-consumable-consumer-bundle.md"
@@ -340,6 +341,12 @@ grep -q "bash scripts/ci/mcp_stdio_server_discovery_smoke.sh" docs/mcp-stdio-ser
 grep -q "render_execution_report" docs/mcp-stdio-server.md
 grep -q "list_entrypoints" docs/mcp-stdio-server.md
 grep -q "describe_entrypoint" docs/mcp-stdio-server.md
+grep -q "Supported Traverse baseline: \`v0.3.0\`" docs/youaskm3-canonical-mcp-client-path.md
+grep -q "cargo run -p traverse-mcp -- stdio" docs/youaskm3-canonical-mcp-client-path.md
+grep -q "stdio MCP client" docs/youaskm3-canonical-mcp-client-path.md
+grep -q "bash scripts/ci/mcp_consumption_validation.sh" docs/youaskm3-canonical-mcp-client-path.md
+grep -q "docs/youaskm3-canonical-mcp-client-path.md" README.md
+grep -q "docs/youaskm3-canonical-mcp-client-path.md" docs/mcp-consumption-validation.md
 grep -q "consumer_name: youaskm3" docs/youaskm3-integration-validation.md
 grep -q "validated_flow_id: youaskm3_mcp_validation" docs/youaskm3-integration-validation.md
 grep -q "bash scripts/ci/project_board_audit.sh" docs/project-management.md
