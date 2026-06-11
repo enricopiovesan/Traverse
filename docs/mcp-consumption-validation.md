@@ -6,6 +6,8 @@ For the shortest local start path before you run this downstream validation, beg
 
 For the dedicated Traverse MCP server package foundation, begin with [docs/mcp-stdio-server.md](mcp-stdio-server.md).
 
+For the release-facing `youaskm3` MCP client path that downstream documentation should cite, begin with [docs/youaskm3-canonical-mcp-client-path.md](youaskm3-canonical-mcp-client-path.md).
+
 For the packaged MCP server artifact, see [docs/packaged-traverse-mcp-server-artifact.md](packaged-traverse-mcp-server-artifact.md).
 
 This validation path is governed by:

@@ -4,6 +4,8 @@ The dedicated Traverse MCP WASM server package is the thin, governed host-facing
 
 The packaged MCP server artifact is defined in [docs/packaged-traverse-mcp-server-artifact.md](packaged-traverse-mcp-server-artifact.md).
 
+For the first `youaskm3` release-facing client path, use [docs/youaskm3-canonical-mcp-client-path.md](youaskm3-canonical-mcp-client-path.md).
+
 It is intentionally narrow:
 
 - it stays a façade over Traverse runtime authority
@@ -80,4 +82,11 @@ Run repository checks:
 
 ```bash
 bash scripts/ci/repository_checks.sh
+```
+
+For downstream `youaskm3` release evidence, also run:
+
+```bash
+bash scripts/ci/mcp_consumption_validation.sh
+bash scripts/ci/mcp_real_agent_exercise_smoke.sh
 ```
