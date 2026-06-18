@@ -42,6 +42,20 @@ bash scripts/ci/spec_alignment_check.sh
 - 100% test coverage for core business and runtime logic
 - Deterministic: same inputs must produce same outputs
 
+## Lean Implementation
+
+Before adding code, apply the Traverse minimality ladder:
+
+1. Confirm the change is required by the active issue and governing spec.
+2. Reuse existing Traverse code, contracts, specs, and docs when they already fit.
+3. Prefer the Rust standard library, Cargo workspace, or existing dependencies over new abstractions.
+4. Prefer a schema, validation branch, test, or documentation update when that solves the issue.
+5. Prefer one focused function, CLI branch, or manifest field before adding broader structure.
+6. Add only the minimum new structure needed for the issue.
+
+Minimality must not reduce spec alignment, contract validation, stable error codes,
+security, traceability, accessibility, or required tests.
+
 ## Recent Changes
 
 - 188-codex-agent-coordination: Added Codex claim check and AGENTS.md coordination rules
