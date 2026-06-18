@@ -56,6 +56,22 @@ not waste context on raw logs.
 - In final updates, include merged PRs, validations, and next recommended issue;
   do not restate every command output.
 
+## Minimality Ladder
+
+Before adding code, apply this Traverse-specific minimality ladder:
+
+1. Does this change need to exist for the active issue and governing spec?
+2. Can existing Traverse code, contracts, specs, or docs already satisfy it?
+3. Can the Rust standard library, Cargo workspace, or an existing dependency do it?
+4. Can a schema, validation branch, test, or documentation update solve it without
+   a new abstraction?
+5. Can one focused function, CLI branch, or manifest field solve it?
+6. Only then add the minimum new structure needed for the issue.
+
+Minimality must never weaken spec alignment, contract validation, stable error
+codes, security, traceability, accessibility, or required tests. Create follow-up
+tickets for useful adjacent improvements instead of expanding an active slice.
+
 ## Operating Lanes
 
 - **Ready-ticket worker**: claim one Ready Project 1 issue and implement it end to end.
