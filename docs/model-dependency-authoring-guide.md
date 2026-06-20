@@ -66,6 +66,25 @@ hardcode Ollama, llama.cpp, WebLLM, cloud APIs, or provider-specific paths.
 - Fake, stub, placeholder, or documentation-only provider implementations do
   not satisfy Spec 045.
 
-Provider availability checks and execution-time resolution are implemented in
-later Spec 045 slices. This schema slice makes app manifests precise enough for
-those runtime paths to be deterministic and testable.
+## Local Ollama Provider
+
+The first concrete provider implementation is `ollama.local.generate` behind the
+`traverse.inference.generate` interface. Workspace config supplies
+`ollama_base_url`, usually `http://127.0.0.1:11434`; public readiness and trace
+evidence must report the selected provider and model without exposing prompts or
+secret config values.
+
+The provider checks `/api/tags` before generation and invokes `/api/generate`
+with `stream: false`. It reports stable machine-readable failures:
+
+- `model_candidate_config_invalid` for invalid endpoint, prompt, model, or
+  options config.
+- `model_provider_unavailable` when the local Ollama endpoint cannot be reached.
+- `model_candidate_unavailable` when the requested model is not installed.
+- `model_provider_failure` when Ollama returns a non-success HTTP status.
+- `model_provider_invalid_response` when Ollama returns malformed or incomplete
+  JSON.
+
+Full candidate resolution across multiple manifest entries is implemented in a
+later Spec 045 slice. This provider slice gives that resolver a real local
+implementation to call.

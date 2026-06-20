@@ -40,7 +40,7 @@ pub struct BrokerConfig {
 impl Default for BrokerConfig {
     fn default() -> Self {
         Self {
-            retention_window: Duration::from_secs(5 * 60),
+            retention_window: Duration::from_mins(5),
             max_queue_len: 1024,
         }
     }

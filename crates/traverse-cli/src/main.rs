@@ -15,17 +15,18 @@ use std::fs;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use traverse_contracts::ViolationRecord;
 use traverse_contracts::{
     EventContract, EventValidationContext, parse_event_contract, validate_event_contract,
 };
+use traverse_contracts::{ViolationRecord, reference_connector_contracts};
 use traverse_registry::{
     ApplicationRegistrationRequest, ApplicationRegistry, ArtifactDigests, BinaryFormat,
     BinaryReference, CapabilityArtifactRecord, CapabilityRegistration, CapabilityRegistry,
-    ComposabilityMetadata, CompositionKind, CompositionPattern, DiscoveryQuery, EventRegistration,
-    EventRegistry, ImplementationKind, LookupScope, RegistryBundle, RegistryProvenance,
-    RegistryScope, SourceKind, SourceReference, WorkflowDefinition, WorkflowReference,
-    WorkflowRegistration, WorkflowRegistry, load_registry_bundle,
+    ComposabilityMetadata, CompositionKind, CompositionPattern, ConnectorRegistration,
+    DiscoveryQuery, EventRegistration, EventRegistry, ImplementationKind, LookupScope,
+    RegistryBundle, RegistryProvenance, RegistryScope, SourceKind, SourceReference,
+    WorkflowDefinition, WorkflowReference, WorkflowRegistration, WorkflowRegistry,
+    load_registry_bundle,
 };
 use traverse_runtime::executor::{SUPPORTED_HOST_ABI_VERSION, verify_wasm_host_abi_bytes};
 use traverse_runtime::{
@@ -2352,6 +2353,8 @@ fn load_registered_bundle(manifest_path: &Path) -> Result<RegisteredBundle, CliE
     let mut event_records = Vec::new();
     let mut workflow_records = Vec::new();
 
+    register_reference_connectors(&mut capability_registry, &bundle)?;
+
     for event in &bundle.events {
         let outcome = event_registry
             .register(EventRegistration {
@@ -2439,6 +2442,28 @@ fn load_registered_bundle(manifest_path: &Path) -> Result<RegisteredBundle, CliE
         event_records,
         workflow_records,
     })
+}
+
+fn register_reference_connectors(
+    capability_registry: &mut CapabilityRegistry,
+    bundle: &RegistryBundle,
+) -> Result<(), CliError> {
+    for connector in reference_connector_contracts() {
+        capability_registry
+            .register_connector(ConnectorRegistration {
+                scope: RegistryScope::Public,
+                contract_path: format!(
+                    "contracts/connectors/{}/connector_contract.json",
+                    connector.connector_id
+                ),
+                contract: connector,
+                registered_at: bundle_registered_at(bundle),
+                governing_spec: "039-connector-plugin-architecture".to_string(),
+                validator_version: env!("CARGO_PKG_VERSION").to_string(),
+            })
+            .map_err(|f| CliError::RegistrationConflict(render_registry_failure(f)))?;
+    }
+    Ok(())
 }
 
 fn render_violation_records(header: &str, violations: &[ViolationRecord]) -> String {
