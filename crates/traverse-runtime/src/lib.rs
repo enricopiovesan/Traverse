@@ -5,6 +5,7 @@ pub use workflows::*;
 pub mod data_store;
 pub mod events;
 pub mod executor;
+pub mod inference;
 pub mod placement;
 pub mod router;
 pub mod security;

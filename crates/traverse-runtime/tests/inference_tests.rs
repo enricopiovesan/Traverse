@@ -1,0 +1,435 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+use serde_json::json;
+use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::thread;
+use traverse_contracts::{governed_content_digest, parse_contract, reference_connector_contracts};
+use traverse_registry::{
+    ArtifactDigests, BinaryFormat, BinaryReference, CapabilityArtifactRecord,
+    CapabilityRegistration, CapabilityRegistry, ComposabilityMetadata, CompositionKind,
+    CompositionPattern, ConnectorRegistration, ImplementationKind, RegistryProvenance,
+    RegistryScope, SourceKind, SourceReference,
+};
+use traverse_runtime::inference::{
+    OllamaInferenceErrorCode, OllamaInferenceProvider, OllamaInferenceRequest, OllamaProviderConfig,
+};
+
+#[test]
+fn ollama_provider_generates_real_response_through_local_http_endpoint() {
+    let base_url = start_ollama_server(vec![
+        json!({"models": [{"name": "llama3.2:3b"}]}).to_string(),
+        json!({"model": "llama3.2:3b", "response": "readiness looks good", "done": true})
+            .to_string(),
+    ]);
+    let provider = provider(&base_url);
+
+    let output = provider
+        .generate(&OllamaInferenceRequest {
+            model: "llama3.2:3b".to_string(),
+            prompt: "Summarize readiness.".to_string(),
+            system_prompt: Some("Be concise.".to_string()),
+            options: json!({"temperature": 0}),
+        })
+        .expect("real local server should return generation output");
+
+    assert_eq!(output.interface_id, "traverse.inference.generate");
+    assert_eq!(output.provider, "ollama");
+    assert_eq!(output.provider_implementation_id, "ollama.local.generate");
+    assert_eq!(output.model, "llama3.2:3b");
+    assert_eq!(output.response, "readiness looks good");
+    assert!(output.done);
+    assert_eq!(output.evidence.selected_provider, "ollama");
+    assert_eq!(output.evidence.selected_model, "llama3.2:3b");
+}
+
+#[test]
+fn ollama_provider_reports_model_unavailable_before_generation() {
+    let base_url = start_ollama_server(vec![
+        json!({"models": [{"name": "mistral:7b"}]}).to_string(),
+    ]);
+    let provider = provider(&base_url);
+
+    let failure = provider
+        .generate(&OllamaInferenceRequest {
+            model: "llama3.2:3b".to_string(),
+            prompt: "Summarize readiness.".to_string(),
+            system_prompt: None,
+            options: json!({}),
+        })
+        .expect_err("missing model must fail before generate call");
+
+    assert_eq!(failure.code, OllamaInferenceErrorCode::ModelUnavailable);
+    assert_eq!(failure.machine_code(), "model_candidate_unavailable");
+}
+
+#[test]
+fn ollama_provider_accepts_model_field_from_tags_and_fallback_generate_fields() {
+    let base_url = start_ollama_server(vec![
+        json!({"models": [{"model": "llama3.2:3b"}]}).to_string(),
+        json!({"response": "fallback fields work"}).to_string(),
+    ]);
+    let provider = provider(&base_url);
+
+    let output = provider
+        .generate(&OllamaInferenceRequest {
+            model: "llama3.2:3b".to_string(),
+            prompt: "Summarize readiness.".to_string(),
+            system_prompt: None,
+            options: serde_json::Value::Null,
+        })
+        .expect("model-key tags and missing optional generate fields should work");
+
+    assert_eq!(output.model, "llama3.2:3b");
+    assert_eq!(output.response, "fallback fields work");
+    assert!(!output.done);
+}
+
+#[test]
+fn ollama_provider_supports_base_path_and_default_port_config() {
+    let base_url = start_ollama_server(vec![
+        json!({"models": [{"name": "llama3.2:3b"}]}).to_string(),
+    ]);
+    let provider = provider(&format!("{base_url}/ollama"));
+
+    provider
+        .check_model_available("llama3.2:3b")
+        .expect("base path endpoint should still call tags");
+
+    let default_port_provider = provider_with_timeout("http://127.0.0.1", 100);
+    assert_eq!(
+        default_port_provider.provider_implementation_id(),
+        "ollama.local.generate"
+    );
+}
+
+#[test]
+fn ollama_provider_reports_invalid_tags_response() {
+    let base_url = start_ollama_server(vec![json!({"models": null}).to_string()]);
+    let provider = provider(&base_url);
+
+    let failure = provider
+        .check_model_available("llama3.2:3b")
+        .expect_err("missing models array must fail");
+
+    assert_eq!(failure.code, OllamaInferenceErrorCode::InvalidResponse);
+    assert_eq!(failure.machine_code(), "model_provider_invalid_response");
+}
+
+#[test]
+fn ollama_provider_reports_invalid_generate_response() {
+    let base_url = start_ollama_server(vec![
+        json!({"models": [{"name": "llama3.2:3b"}]}).to_string(),
+        json!({"model": "llama3.2:3b", "done": true}).to_string(),
+    ]);
+    let provider = provider(&base_url);
+
+    let failure = provider
+        .generate(&OllamaInferenceRequest {
+            model: "llama3.2:3b".to_string(),
+            prompt: "Summarize readiness.".to_string(),
+            system_prompt: None,
+            options: json!({}),
+        })
+        .expect_err("generate response without response text must fail");
+
+    assert_eq!(failure.code, OllamaInferenceErrorCode::InvalidResponse);
+}
+
+#[test]
+fn ollama_provider_reports_http_failure_and_malformed_json() {
+    let http_failure = provider(&start_raw_server(vec![http_response(
+        500,
+        &json!({"error": "model load failed"}).to_string(),
+    )]))
+    .check_model_available("llama3.2:3b")
+    .expect_err("non-success status must fail");
+    assert_eq!(http_failure.code, OllamaInferenceErrorCode::ProviderFailure);
+
+    let malformed_json = provider(&start_raw_server(vec![http_response(200, "{not-json}")]))
+        .check_model_available("llama3.2:3b")
+        .expect_err("malformed JSON must fail");
+    assert_eq!(
+        malformed_json.code,
+        OllamaInferenceErrorCode::InvalidResponse
+    );
+}
+
+#[test]
+fn ollama_provider_reports_malformed_http_responses() {
+    let missing_separator = provider(&start_raw_server(vec!["HTTP/1.1 200 OK".to_string()]))
+        .check_model_available("llama3.2:3b")
+        .expect_err("missing header separator must fail");
+    assert_eq!(
+        missing_separator.code,
+        OllamaInferenceErrorCode::InvalidResponse
+    );
+
+    let missing_status = provider(&start_raw_server(vec![http_response_with_status(
+        "HTTP/1.1", "{}",
+    )]))
+    .check_model_available("llama3.2:3b")
+    .expect_err("missing status code must fail");
+    assert_eq!(
+        missing_status.code,
+        OllamaInferenceErrorCode::InvalidResponse
+    );
+
+    let empty_status = provider(&start_raw_server(vec!["\r\n\r\n{}".to_string()]))
+        .check_model_available("llama3.2:3b")
+        .expect_err("empty status line must fail");
+    assert_eq!(empty_status.code, OllamaInferenceErrorCode::InvalidResponse);
+
+    let invalid_status = provider(&start_raw_server(vec![http_response_with_status(
+        "HTTP/1.1 OK",
+        "{}",
+    )]))
+    .check_model_available("llama3.2:3b")
+    .expect_err("invalid status code must fail");
+    assert_eq!(
+        invalid_status.code,
+        OllamaInferenceErrorCode::InvalidResponse
+    );
+}
+
+#[test]
+fn ollama_provider_reports_provider_unavailable() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral port should bind");
+    let port = listener
+        .local_addr()
+        .expect("listener address should be readable")
+        .port();
+    drop(listener);
+    let provider = provider_with_timeout(&format!("http://127.0.0.1:{port}"), 100);
+
+    let failure = provider
+        .check_model_available("llama3.2:3b")
+        .expect_err("closed local port must fail as provider unavailable");
+
+    assert_eq!(
+        failure.code,
+        OllamaInferenceErrorCode::ModelProviderUnavailable
+    );
+    assert_eq!(failure.machine_code(), "model_provider_unavailable");
+}
+
+#[test]
+fn ollama_provider_rejects_invalid_config_and_prompt() {
+    let config_failure = OllamaInferenceProvider::new(OllamaProviderConfig {
+        base_url: "https://127.0.0.1:11434".to_string(),
+        request_timeout_ms: None,
+    })
+    .expect_err("https endpoint is not supported by stdlib local provider");
+    assert_eq!(config_failure.code, OllamaInferenceErrorCode::InvalidConfig);
+
+    let provider = provider("http://127.0.0.1:11434");
+    let prompt_failure = provider
+        .generate(&OllamaInferenceRequest {
+            model: "llama3.2:3b".to_string(),
+            prompt: " ".to_string(),
+            system_prompt: None,
+            options: json!({}),
+        })
+        .expect_err("blank prompt must fail before provider call");
+    assert_eq!(prompt_failure.code, OllamaInferenceErrorCode::InvalidConfig);
+
+    let generate_model_failure = provider
+        .generate(&OllamaInferenceRequest {
+            model: " ".to_string(),
+            prompt: "Summarize readiness.".to_string(),
+            system_prompt: None,
+            options: json!({}),
+        })
+        .expect_err("blank model in generate request must fail before provider call");
+    assert_eq!(
+        generate_model_failure.code,
+        OllamaInferenceErrorCode::InvalidConfig
+    );
+
+    let model_failure = provider
+        .check_model_available(" ")
+        .expect_err("blank model must fail before provider call");
+    assert_eq!(model_failure.code, OllamaInferenceErrorCode::InvalidConfig);
+
+    let options_failure = provider
+        .generate(&OllamaInferenceRequest {
+            model: "llama3.2:3b".to_string(),
+            prompt: "Summarize readiness.".to_string(),
+            system_prompt: None,
+            options: json!("invalid"),
+        })
+        .expect_err("non-object options must fail before provider call");
+    assert_eq!(
+        options_failure.code,
+        OllamaInferenceErrorCode::InvalidConfig
+    );
+}
+
+#[test]
+fn ollama_provider_rejects_invalid_endpoint_shapes() {
+    for base_url in ["http://", "http://:11434", "http://127.0.0.1:not-a-port"] {
+        let failure = OllamaInferenceProvider::new(OllamaProviderConfig {
+            base_url: base_url.to_string(),
+            request_timeout_ms: None,
+        })
+        .expect_err("invalid endpoint should fail");
+        assert_eq!(failure.code, OllamaInferenceErrorCode::InvalidConfig);
+    }
+}
+
+#[test]
+fn ollama_error_codes_are_stable() {
+    assert_eq!(
+        OllamaInferenceErrorCode::InvalidConfig.as_str(),
+        "model_candidate_config_invalid"
+    );
+    assert_eq!(
+        OllamaInferenceErrorCode::ProviderFailure.as_str(),
+        "model_provider_failure"
+    );
+}
+
+#[test]
+fn ollama_provider_reports_resolution_failure() {
+    let provider = provider_with_timeout("http://invalid host:11434", 100);
+
+    let failure = provider
+        .check_model_available("llama3.2:3b")
+        .expect_err("invalid hostname should fail during provider resolution");
+
+    assert_eq!(
+        failure.code,
+        OllamaInferenceErrorCode::ModelProviderUnavailable
+    );
+    assert!(failure.to_string().contains("model_provider_unavailable"));
+}
+
+#[test]
+fn inference_contract_validates_and_registers_with_http_connector() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/inference/traverse.inference.generate/contract.json");
+    let contract_text =
+        fs::read_to_string(&path).expect("inference contract fixture should be readable");
+    let contract = parse_contract(&contract_text).expect("inference contract should validate");
+    assert_eq!(contract.id, "traverse.inference.generate");
+    assert_eq!(
+        contract.connector_requirements[0].connector_id,
+        "traverse.http"
+    );
+
+    let mut registry = CapabilityRegistry::new();
+    let connector = reference_connector_contracts()
+        .into_iter()
+        .find(|candidate| candidate.connector_id == "traverse.http")
+        .expect("reference http connector should exist");
+    registry
+        .register_connector(ConnectorRegistration {
+            scope: RegistryScope::Public,
+            contract: connector,
+            contract_path: "contracts/connectors/traverse.http/connector_contract.json".to_string(),
+            registered_at: "2026-06-19T00:00:00Z".to_string(),
+            governing_spec: "045-governed-model-dependency-resolution".to_string(),
+            validator_version: "test".to_string(),
+        })
+        .expect("http connector should register");
+
+    let outcome = registry
+        .register(CapabilityRegistration {
+            scope: RegistryScope::Public,
+            contract: contract.clone(),
+            contract_path: path.display().to_string(),
+            artifact: CapabilityArtifactRecord {
+                artifact_ref: "ollama.local.generate".to_string(),
+                implementation_kind: ImplementationKind::Executable,
+                source: SourceReference {
+                    kind: SourceKind::Local,
+                    location: "crates/traverse-runtime/src/inference.rs".to_string(),
+                },
+                binary: Some(BinaryReference {
+                    format: BinaryFormat::Wasm,
+                    location: "providers/ollama.local.generate.wasm".to_string(),
+                    signature: None,
+                }),
+                workflow_ref: None,
+                digests: ArtifactDigests {
+                    source_digest: governed_content_digest(&contract),
+                    binary_digest: Some(
+                        "sha256:ollama-local-generate-provider-artifact".to_string(),
+                    ),
+                },
+                provenance: RegistryProvenance {
+                    source: "greenfield".to_string(),
+                    author: "enricopiovesan".to_string(),
+                    created_at: "2026-06-19T00:00:00Z".to_string(),
+                },
+            },
+            registered_at: "2026-06-19T00:00:00Z".to_string(),
+            tags: vec!["inference".to_string(), "ollama".to_string()],
+            composability: ComposabilityMetadata {
+                kind: CompositionKind::Atomic,
+                patterns: vec![CompositionPattern::Enrichment],
+                provides: vec!["traverse.inference.generate".to_string()],
+                requires: vec!["traverse.http".to_string()],
+            },
+            governing_spec: "045-governed-model-dependency-resolution".to_string(),
+            validator_version: "test".to_string(),
+        })
+        .expect("inference capability should register when http connector exists");
+
+    assert_eq!(outcome.record.id, "traverse.inference.generate");
+}
+
+fn provider(base_url: &str) -> OllamaInferenceProvider {
+    provider_with_timeout(base_url, 1_000)
+}
+
+fn provider_with_timeout(base_url: &str, timeout_ms: u64) -> OllamaInferenceProvider {
+    OllamaInferenceProvider::new(OllamaProviderConfig {
+        base_url: base_url.to_string(),
+        request_timeout_ms: Some(timeout_ms),
+    })
+    .expect("provider config should be valid")
+}
+
+fn start_ollama_server(bodies: Vec<String>) -> String {
+    start_raw_server(
+        bodies
+            .into_iter()
+            .map(|body| http_response(200, &body))
+            .collect(),
+    )
+}
+
+fn start_raw_server(responses: Vec<String>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let address = listener
+        .local_addr()
+        .expect("test server address should be available");
+    thread::spawn(move || {
+        for response in responses {
+            let (mut stream, _) = listener.accept().expect("test request should arrive");
+            let mut buffer = [0_u8; 2048];
+            let _ = stream
+                .read(&mut buffer)
+                .expect("test request should be readable");
+            stream
+                .write_all(response.as_bytes())
+                .expect("test response should write");
+        }
+    });
+
+    format!("http://{address}")
+}
+
+fn http_response(status: u16, body: &str) -> String {
+    http_response_with_status(&format!("HTTP/1.1 {status} OK"), body)
+}
+
+fn http_response_with_status(status_line: &str, body: &str) -> String {
+    format!(
+        "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}

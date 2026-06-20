@@ -1,0 +1,164 @@
+{
+  "kind": "capability_contract",
+  "schema_version": "1.0.0",
+  "id": "traverse.inference.generate",
+  "namespace": "traverse.inference",
+  "name": "generate",
+  "version": "1.0.0",
+  "lifecycle": "active",
+  "owner": {
+    "team": "traverse-core",
+    "contact": "enrico.piovesan10@gmail.com"
+  },
+  "summary": "Generate text through a Traverse-governed inference provider implementation.",
+  "description": "Provider-neutral inference interface satisfied first by the real local Ollama implementation. Downstream app product logic depends on this interface rather than direct provider APIs.",
+  "inputs": {
+    "schema": {
+      "type": "object",
+      "required": [
+        "model",
+        "prompt"
+      ],
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "system_prompt": {
+          "type": "string"
+        },
+        "options": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "outputs": {
+    "schema": {
+      "type": "object",
+      "required": [
+        "interface_id",
+        "provider",
+        "provider_implementation_id",
+        "model",
+        "response",
+        "done",
+        "evidence"
+      ],
+      "properties": {
+        "interface_id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "provider_implementation_id": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "response": {
+          "type": "string"
+        },
+        "done": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "object",
+          "required": [
+            "placement_target",
+            "selected_provider",
+            "selected_model"
+          ],
+          "properties": {
+            "placement_target": {
+              "type": "string"
+            },
+            "selected_provider": {
+              "type": "string"
+            },
+            "selected_model": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "preconditions": [
+    {
+      "id": "local-provider-configured",
+      "description": "Workspace-local config provides a reachable Ollama base URL without exposing secrets in public evidence."
+    },
+    {
+      "id": "model-installed",
+      "description": "The requested local model is installed and listed by Ollama before generation."
+    }
+  ],
+  "postconditions": [
+    {
+      "id": "inference-output-produced",
+      "description": "A real model response is returned with non-sensitive provider/model evidence."
+    }
+  ],
+  "side_effects": [
+    {
+      "kind": "external_call",
+      "description": "Performs local HTTP requests to the configured Ollama provider."
+    }
+  ],
+  "emits": [],
+  "consumes": [],
+  "permissions": [
+    {
+      "id": "traverse.inference.generate.local"
+    }
+  ],
+  "execution": {
+    "binary_format": "wasm",
+    "entrypoint": {
+      "kind": "wasi-command",
+      "command": "ollama.local.generate"
+    },
+    "preferred_targets": [
+      "local"
+    ],
+    "constraints": {
+      "host_api_access": "none",
+      "network_access": "required",
+      "filesystem_access": "none"
+    }
+  },
+  "policies": [
+    {
+      "id": "no-private-prompt-in-public-evidence"
+    }
+  ],
+  "dependencies": [],
+  "provenance": {
+    "source": "greenfield",
+    "author": "enricopiovesan",
+    "created_at": "2026-06-19T00:00:00Z",
+    "spec_ref": "045-governed-model-dependency-resolution@1.0.0",
+    "adr_refs": [],
+    "exception_refs": []
+  },
+  "evidence": [],
+  "service_type": "stateless",
+  "permitted_targets": [
+    "local"
+  ],
+  "connector_requirements": [
+    {
+      "connector_id": "traverse.http",
+      "version": "^1.0.0"
+    }
+  ],
+  "artifact_type": "native"
+}
