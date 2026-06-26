@@ -80,6 +80,7 @@ required_files=(
   "scripts/ci/youaskm3_compatibility_conformance.sh"
   "scripts/ci/downstream_app_mvp_conformance.sh"
   "scripts/ci/downstream_app_bundle_registration_smoke.sh"
+  "scripts/ci/downstream_public_app_registration_smoke.sh"
   "scripts/ci/downstream_wasm_workflow_smoke.sh"
   "scripts/ci/downstream_model_dependency_smoke.sh"
   "scripts/ci/downstream_http_json_smoke.sh"
