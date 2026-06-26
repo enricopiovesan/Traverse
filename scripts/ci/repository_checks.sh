@@ -18,6 +18,7 @@ required_files=(
   "docs/v0.3.0-source-build-consumer-packaging.md"
   "docs/v0.3.0-downstream-validation-path.md"
   "docs/youaskm3-v0.3.0-integration-readiness.md"
+  "docs/releases/v0.5.0.md"
   "docs/troubleshooting.md"
   "docs/adapter-boundaries.md"
   "docs/contract-publication-policy.md"
@@ -354,12 +355,19 @@ grep -q "Supply-chain evidence" docs/v0.3.0-public-surface-compatibility.md
 grep -q "docs/v0.3.0-source-build-consumer-packaging.md" README.md
 grep -q "docs/v0.3.0-downstream-validation-path.md" README.md
 grep -q "docs/youaskm3-v0.3.0-integration-readiness.md" README.md
-grep -q "docs/releases/v0.4.0.md" README.md
+grep -q "docs/releases/v0.5.0.md" README.md
 grep -q "Traverse v0.4.0" docs/releases/v0.4.0.md
 grep -q "044-application-bundle-manifest" docs/releases/v0.4.0.md
 grep -q "045-governed-model-dependency-resolution" docs/releases/v0.4.0.md
 grep -q "bash scripts/ci/downstream_app_mvp_conformance.sh" docs/releases/v0.4.0.md
 grep -q "traverse-sbom.cdx.json" docs/releases/v0.4.0.md
+grep -q "Traverse v0.5.0" docs/releases/v0.5.0.md
+grep -q "046-public-cli-app-registration" docs/releases/v0.5.0.md
+grep -q "traverse-cli app validate --manifest <path> --json" docs/releases/v0.5.0.md
+grep -q "traverse-cli app register --manifest <path> --workspace <workspace-id> --json" docs/releases/v0.5.0.md
+grep -q "runtime loading from CLI-produced workspace app state" docs/releases/v0.5.0.md
+grep -q "bash scripts/ci/downstream_app_mvp_conformance.sh" docs/releases/v0.5.0.md
+grep -q "traverse-sbom.cdx.json" docs/releases/v0.5.0.md
 grep -q "cargo build" docs/v0.3.0-source-build-consumer-packaging.md
 grep -q "cargo run -p traverse-cli -- serve" docs/v0.3.0-source-build-consumer-packaging.md
 grep -q "cargo run -p traverse-mcp -- stdio" docs/v0.3.0-source-build-consumer-packaging.md
